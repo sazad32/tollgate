@@ -28,7 +28,8 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 
 ## Stack (decided — see docs/adr before proposing changes)
 - Python 3.12, uv, FastAPI, httpx (async), Pydantic v2, pytest + pytest-asyncio, Ruff
-- vLLM (OpenAI-compatible server), one replica per GPU node
+- Model servers, all OpenAI-compatible (ADR 0004): llama.cpp `llama-server` on the k3s nodes, one replica
+  per GPU node; vLLM in Docker on the workstation; optional rented cloud GPU for benchmarks
 - Redis (rate limits, per-tenant queues) and Redis Streams (usage events)
 - PostgreSQL (usage ledger, pricing, invoices) — SQLAlchemy 2.0 async + Alembic
 - Keycloak (OIDC) + hashed API keys
@@ -37,9 +38,12 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 - k3s (2 nodes, 1 GPU each), Helm, GitHub Actions, GitHub Container Registry
 
 ## Environment facts
-- node-1 and node-2 each advertise `nvidia.com/gpu: 1`
+- node-1 and node-2 each advertise `nvidia.com/gpu: 1`. node-1 is the k3s server (control plane); node-2 is an agent.
 - Persistent storage: node-2 at `/mnt/storage` (local PV today; a StorageClass is a Phase 1 task)
-- GPU VRAM per node: TODO — Saimoon to fill in. Model choice depends on it.
+- Node GPUs: node-1 GeForce GTX 860M, node-2 GTX 960M. Both 4 GB VRAM, compute capability 5.0, driver 580. Too old for vLLM
+  (needs 7.0+). Use CUDA 12 builds; CUDA 13 dropped this generation.
+- Workstation (Saimoon's Windows PC, outside the cluster): RTX 3060 Laptop GPU, 6 GB VRAM, compute
+  capability 8.6, Docker Desktop on WSL2. Runs vLLM. Not always on.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.

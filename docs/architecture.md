@@ -6,10 +6,10 @@ Tenant (API key or OIDC token)
   -> Gateway (FastAPI)
        1. Authenticate: hashed API key lookup, or JWT validated against Keycloak's signing keys
        2. Admit: per-tenant token budget check in Redis (reserve an estimate)
-       3. Route: local vLLM (default) or hosted model (overflow / flagged / policy allows)
+       3. Route: a local model server (default) or hosted model (overflow / flagged / policy allows)
        4. Stream: proxy SSE chunks back to the client, counting tokens as they pass
        5. Settle: release unused reservation; emit one usage event
-  -> vLLM on node-1 GPU | vLLM on node-2 GPU | Hosted model (Anthropic API)
+  -> llama-server on node-1 | llama-server on node-2 | vLLM on workstation | Hosted model (Anthropic API)
 ```
 
 ## Usage path (asynchronous — never blocks requests)
@@ -24,7 +24,8 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | Component | Runs where | State |
 | --- | --- | --- |
 | Gateway | k3s Deployment, 2 replicas | Stateless |
-| vLLM | 1 pod per GPU node (nodeSelector / GPU request) | Model weights on PV |
+| llama-server | 1 pod per GPU node (nodeSelector / GPU request) | Model weights on PV |
+| vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights on local disk |
 | Redis | k3s StatefulSet | Rate-limit counters, queues, usage stream |
 | Postgres | k3s StatefulSet on node-2 storage | Ledger, pricing, invoices, tenants |
 | Keycloak | k3s Deployment | Its own Postgres schema |

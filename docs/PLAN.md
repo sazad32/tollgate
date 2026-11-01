@@ -11,9 +11,10 @@
 
 ## Phase 1 — Serve a model (weeks 1–4)
 - [x] Week 1: Repo scaffold (uv workspace, Ruff, pytest, GitHub Actions); scenario in README; first ADRs
-- [ ] Week 2: StorageClass for model weights; deploy vLLM with one replica per GPU node
-- [ ] Week 3: Prometheus + Grafana; scrape vLLM metrics and GPU use
-- [ ] Week 4: Benchmark TTFT and tokens/sec at 1, 8, 32, 64 concurrent users; publish the table
+- [ ] Week 2: StorageClass for model weights; deploy `llama-server` with one replica per GPU node; vLLM in
+  Docker on the workstation (ADR 0004)
+- [ ] Week 3: Prometheus + Grafana; scrape model-server metrics (`llama-server`, vLLM) and GPU use
+- [ ] Week 4: Benchmark TTFT and tokens/sec at 1, 8, 32, 64 concurrent users on each backend; publish the table
 
 **Gate:** benchmark table published in `bench/RESULTS.md`.
 
