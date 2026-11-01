@@ -39,6 +39,11 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 
 ## Environment facts
 - node-1 and node-2 each advertise `nvidia.com/gpu: 1`. node-1 is the k3s server (control plane); node-2 is an agent.
+- k3s v1.35. node-1 runs Ubuntu 24.04 (kernel 6.8); node-2 runs Ubuntu 26.04 (kernel 7.0). NVIDIA driver
+  packages are on `apt-mark hold` on both nodes: update the driver and reboot together.
+- Already in the cluster: Traefik ingress, `local-path` provisioner (default StorageClass), metrics-server,
+  NVIDIA device plugin. Tollgate uses its own `tollgate` namespace; leave `default` alone.
+- kubectl on the workstation uses the `tollgate` context (kubeconfig in the user's home, never in the repo).
 - Persistent storage: node-2 at `/mnt/storage` (local PV today; a StorageClass is a Phase 1 task)
 - Node GPUs: node-1 GeForce GTX 860M, node-2 GTX 960M. Both 4 GB VRAM, compute capability 5.0, driver 580. Too old for vLLM
   (needs 7.0+). Use CUDA 12 builds; CUDA 13 dropped this generation.
