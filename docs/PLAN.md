@@ -10,7 +10,7 @@
 | 3. Private client build | Later | Client infrastructure or a Canadian cloud region, separate private repo | Client data stays with the client |
 
 ## Phase 1 — Serve a model (weeks 1–4)
-- [ ] Week 1: Repo scaffold (uv workspace, Ruff, pytest, GitHub Actions); scenario in README; first ADRs
+- [x] Week 1: Repo scaffold (uv workspace, Ruff, pytest, GitHub Actions); scenario in README; first ADRs
 - [ ] Week 2: StorageClass for model weights; deploy vLLM with one replica per GPU node
 - [ ] Week 3: Prometheus + Grafana; scrape vLLM metrics and GPU use
 - [ ] Week 4: Benchmark TTFT and tokens/sec at 1, 8, 32, 64 concurrent users; publish the table
