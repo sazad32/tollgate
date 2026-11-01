@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+**/secrets/
+*.pem
+*.key
+
+# Local Claude Code settings (shared settings.json is committed)
+.claude/settings.local.json
+
+# Model weights and bench artefacts
+*.safetensors
+*.gguf
+models/
+bench/raw/
+
+# Node (dashboard, Phase 5)
+node_modules/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
