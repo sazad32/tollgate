@@ -1,0 +1,10 @@
+[project]
+name = "tollgate-billing"
+version = "0.1.0"
+description = "Usage event consumer, ledger, pricing and invoices"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"

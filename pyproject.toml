@@ -1,0 +1,41 @@
+# Workspace root (like a .sln + Directory.Build.props). It isn't a package itself: no [build-system].
+[project]
+name = "tollgate"
+version = "0.1.0"
+description = "Self-hosted AI platform: open models on local GPUs behind a metering, billing gateway"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = ["tollgate-gateway", "tollgate-billing"]
+
+[tool.uv.workspace]
+members = ["gateway", "billing"]
+
+[tool.uv.sources]
+tollgate-gateway = { workspace = true }
+tollgate-billing = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "W", # pycodestyle: errors and warnings
+    "F",      # Pyflakes: unused imports, undefined names
+    "I",      # isort: import order
+    "N",      # pep8-naming: snake_case / PascalCase
+    "UP",     # pyupgrade: modern syntax for the target Python
+    "B",      # flake8-bugbear: likely bugs, e.g. mutable default arguments
+    "SIM",    # flake8-simplify
+    "ASYNC",  # flake8-async: blocking calls inside async def
+]
+
+[tool.pytest.ini_options]
+testpaths = ["gateway/tests", "billing/tests"]
+addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
