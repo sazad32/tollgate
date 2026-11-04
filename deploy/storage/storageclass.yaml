@@ -1,0 +1,13 @@
+# Node-local disks, provisioned by hand as static PersistentVolumes (ADR 0006).
+# - no-provisioner: Kubernetes never creates volumes for this class; we write each PV ourselves.
+# - WaitForFirstConsumer: a claim binds only when its pod is scheduled, so the scheduler picks a
+#   node where a matching PV exists. A local PV can only be mounted on its own node.
+# Reclaim policy is set on each PV (Retain); a StorageClass reclaimPolicy only affects dynamic volumes.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: tollgate-local
+  labels:
+    app.kubernetes.io/part-of: tollgate
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
