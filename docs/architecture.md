@@ -24,8 +24,8 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | Component | Runs where | State |
 | --- | --- | --- |
 | Gateway | k3s Deployment, 2 replicas | Stateless |
-| llama-server | 1 pod per GPU node (nodeSelector / GPU request) | Model weights on PV |
-| vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights on local disk |
+| llama-server | k3s StatefulSet, 1 pod per GPU node (ADR 0004, 0006) | Model weights on a local PV per node |
+| vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights in a Docker volume |
 | Redis | k3s StatefulSet | Rate-limit counters, queues, usage stream |
 | Postgres | k3s StatefulSet on node-2 storage | Ledger, pricing, invoices, tenants |
 | Keycloak | k3s Deployment | Its own Postgres schema |

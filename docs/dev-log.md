@@ -2,6 +2,13 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-03 — Week 2: model serving
+- Changed: SmolLM3-3B on every backend (ADR 0005); `tollgate-local` StorageClass with one PV per node
+  (ADR 0006); llama-server StatefulSet, one pod per GPU node, plus Services; vLLM compose on the workstation.
+- Broke: vLLM 0.30+ rejects Red Hat's build (`actorder: group`), so we use a community one. Docker Desktop
+  4.30 broke CUDA in containers until updated. Docker's firewall rule exposed its ports on Public networks.
+- Measured: generation 12–14 tok/s per node, ~108 tok/s on vLLM; node pod restart 15 s.
+
 ## 2026-11-01 — Cluster prep
 - Changed: SSH key auth to both nodes; kubectl access from the workstation (`tollgate` context);
   NVIDIA driver packages held on both nodes; ADR 0004 (llama-server on the nodes, vLLM on the workstation).
