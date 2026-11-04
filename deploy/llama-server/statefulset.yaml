@@ -1,0 +1,133 @@
+# llama-server: one replica per GPU node, each with its own copy of the weights (ADR 0004, ADR 0006).
+# A StatefulSet, not a Deployment: volumeClaimTemplates give each replica its own claim, which then
+# binds to the local PV on whichever node the replica lands on.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: llama-server
+spec:
+  serviceName: llama-server-headless
+  replicas: 2
+  # Start both replicas at once; ordered start-up buys nothing for interchangeable model servers.
+  podManagementPolicy: Parallel
+  # Replace one pod at a time, never adding an extra one: a surge pod could not get a GPU anyway.
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llama-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llama-server
+        app.kubernetes.io/component: model-server
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      # k3s registers the NVIDIA container runtime under this class; without it the GPU isn't visible.
+      runtimeClassName: nvidia
+      nodeSelector:
+        gpu: "true"
+      affinity:
+        # Each node has one GPU, so the GPU request already forces one pod per node.
+        # This rule states the intent explicitly.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: llama-server
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        # Download the pinned model once per node and verify its checksum on every start.
+        # Same image as the server (it ships curl), so the node pulls nothing extra.
+        - name: fetch-model
+          # Keep in step with the llama-server container below. Build b12063, CUDA 12.8.1.
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda12@sha256:d5ffba7d096ab0236c65dc147d797b4b7658a7e5425634593373635d661bccda
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              dest="$LLAMA_ARG_MODEL"
+              part="$dest.part"
+              verify() { echo "$TOLLGATE_MODEL_SHA256  $1" | sha256sum -c --status; }
+              mkdir -p "$(dirname "$dest")" "$CUDA_CACHE_PATH"
+              if [ -f "$dest" ] && verify "$dest"; then
+                echo "model present, checksum ok: $dest"
+                exit 0
+              fi
+              rm -f "$dest"
+              echo "downloading $TOLLGATE_MODEL_URL"
+              curl -fL --no-progress-meter --retry 5 --retry-delay 5 -o "$part" "$TOLLGATE_MODEL_URL"
+              if ! verify "$part"; then
+                echo "checksum mismatch, discarding download" >&2
+                rm -f "$part"
+                exit 1
+              fi
+              mv "$part" "$dest"
+              echo "model downloaded, checksum ok: $dest"
+          envFrom:
+            - configMapRef:
+                name: llama-server-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 512Mi # writing and hashing a 2 GB file fills page cache, which counts here
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: llama-server
+          # Pinned by digest: tags are rebuilt daily. Build b12063, CUDA 12.8.1, includes compute 5.0 as PTX.
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda12@sha256:d5ffba7d096ab0236c65dc147d797b4b7658a7e5425634593373635d661bccda
+          envFrom:
+            - configMapRef:
+                name: llama-server-config
+          ports:
+            - name: http
+              containerPort: 8080
+          # /health returns 503 while the model loads and 200 once it can serve.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60 # up to 10 minutes to load the model
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            # Loose on purpose: a busy server must not be killed mid-benchmark.
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              nvidia.com/gpu: 1
+            limits:
+              memory: 4Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+  volumeClaimTemplates:
+    - metadata:
+        name: models
+      spec:
+        storageClassName: tollgate-local
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi
+        selector:
+          matchLabels:
+            tollgate/purpose: model-weights

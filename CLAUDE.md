@@ -19,7 +19,8 @@ Do not build anything from a later phase unless asked.
 ```
 gateway/      Python package `tollgate_gateway` — FastAPI gateway (Phase 2)
 billing/      Python package `tollgate_billing` — usage consumer, pricing, invoices (Phase 3)
-deploy/       Helm chart and k3s manifests (vLLM, Redis, Postgres, Keycloak, monitoring)
+deploy/       k3s manifests (llama-server, later Redis, Postgres, Keycloak, monitoring), Helm chart (Phase 6),
+              workstation/vllm/ Docker Compose for vLLM
 bench/        Load and benchmark scripts (k6 or Locust) + results
 dashboard/    React + TypeScript (Phase 5 only)
 docs/         PLAN.md, architecture.md, adr/, dev-log.md
@@ -44,11 +45,15 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 - Already in the cluster: Traefik ingress, `local-path` provisioner (default StorageClass), metrics-server,
   NVIDIA device plugin. Tollgate uses its own `tollgate` namespace; leave `default` alone.
 - kubectl on the workstation uses the `tollgate` context (kubeconfig in the user's home, never in the repo).
-- Persistent storage: node-2 at `/mnt/storage` (local PV today; a StorageClass is a Phase 1 task)
+- Persistent storage: `tollgate-local` StorageClass with static local PVs (ADR 0006). node-2's `/mnt/storage`
+  is a 458 GB data disk; on node-1 it's a folder on the root disk. Model weights live at
+  `/mnt/storage/tollgate/models` on both nodes. Durable data (Postgres) goes on node-2.
+- GPU pods need `runtimeClassName: nvidia` and `nodeSelector: gpu: "true"`.
 - Node GPUs: node-1 GeForce GTX 860M, node-2 GTX 960M. Both 4 GB VRAM, compute capability 5.0, driver 580. Too old for vLLM
   (needs 7.0+). Use CUDA 12 builds; CUDA 13 dropped this generation.
 - Workstation (Saimoon's Windows PC, outside the cluster): RTX 3060 Laptop GPU, 6 GB VRAM, compute
-  capability 8.6, Docker Desktop on WSL2. Runs vLLM. Not always on.
+  capability 8.6, Docker Desktop on WSL2. Runs vLLM. Not always on. Windows uses 1–2 GB of this GPU for
+  the display, so vLLM gets about 4 GB.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -75,6 +80,11 @@ uv sync                         # install workspace
 uv run pytest                   # all tests
 uv run ruff check --fix . && uv run ruff format .
 kubectl get pods -A             # cluster state
+kubectl apply -k deploy         # create or update everything Tollgate runs in k3s
+kubectl -n tollgate get pods -o wide                             # llama-server: one pod per GPU node
+kubectl -n tollgate port-forward svc/llama-server 8080:8080      # call llama-server from the workstation
+docker compose -f deploy/workstation/vllm/compose.yaml up -d     # vLLM on the workstation (needs .env)
+docker compose -f deploy/workstation/vllm/compose.yaml down      # stop vLLM, free the GPU
 ```
 (Add new commands here as they are created.)
 

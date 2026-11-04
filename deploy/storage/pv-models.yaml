@@ -1,0 +1,52 @@
+# One model-weights volume per GPU node (ADR 0006). Each llama-server replica claims the one on its node.
+# The directory must exist before a pod can mount it (one-time, needs sudo on each node):
+#   sudo mkdir -p /mnt/storage/tollgate/models
+# On vps-node-2 this path is the 458 GB data disk; on vps-node-1 it is a folder on the root disk.
+# Capacity is a label for matching only: local volumes don't enforce a size limit.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tollgate-models-vps-node-1
+  labels:
+    app.kubernetes.io/part-of: tollgate
+    tollgate/purpose: model-weights
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: tollgate-local
+  local:
+    path: /mnt/storage/tollgate/models
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [vps-node-1]
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tollgate-models-vps-node-2
+  labels:
+    app.kubernetes.io/part-of: tollgate
+    tollgate/purpose: model-weights
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: tollgate-local
+  local:
+    path: /mnt/storage/tollgate/models
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [vps-node-2]
