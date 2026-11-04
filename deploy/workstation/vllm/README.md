@@ -47,7 +47,6 @@ to your home network: mark the home Wi-Fi as Private and restrict the rule to th
 local subnet (admin PowerShell):
 ```powershell
 Set-NetConnectionProfile -InterfaceAlias Wi-Fi -NetworkCategory Private
-Get-NetFirewallRule -DisplayName "Docker Desktop Backend" | Set-NetFirewallRule -Profile Private
-Get-NetFirewallRule -DisplayName "Docker Desktop Backend" | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet
+Set-NetFirewallRule -DisplayName "Docker Desktop Backend" -Profile Private -RemoteAddress LocalSubnet
 ```
 Re-check after Docker Desktop updates: a new install can prompt again and create a new rule.
