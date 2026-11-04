@@ -47,6 +47,12 @@ to your home network: mark the home Wi-Fi as Private and restrict the rule to th
 local subnet (admin PowerShell):
 ```powershell
 Set-NetConnectionProfile -InterfaceAlias Wi-Fi -NetworkCategory Private
-Set-NetFirewallRule -DisplayName "Docker Desktop Backend" -Profile Private -RemoteAddress LocalSubnet
+Set-NetFirewallRule -DisplayName "Docker Desktop Backend" -Profile Private
+Set-NetFirewallRule -DisplayName "Docker Desktop Backend" -EdgeTraversalPolicy Block -RemoteAddress LocalSubnet
 ```
+The rule Windows creates has edge traversal set to "Defer to user", which doesn't allow an address
+condition. That's why the second line also sets it to `Block`. Edge traversal lets internet traffic reach the
+app through NAT tunnelling (Teredo), which Docker doesn't need.
+
+Check from a node: `/health` should return 200 and `/v1/models` without a key should return 401.
 Re-check after Docker Desktop updates: a new install can prompt again and create a new rule.
