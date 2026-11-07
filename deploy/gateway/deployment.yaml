@@ -1,0 +1,80 @@
+# The gateway: stateless, CPU only, 2 replicas spread over the nodes (ADR 0009).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tollgate-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tollgate-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # always keep serving during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tollgate-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      # One replica per node when possible, so losing a node leaves one running.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: tollgate-gateway
+      # Streams can run for minutes. A pod being replaced gets this long to finish the ones in flight.
+      terminationGracePeriodSeconds: 120
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          # Built by .github/workflows/gateway-image.yml from commit a0d60c8. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-a0d60c8@sha256:be90511aecbf0b41929940d3c09850ff86d8b901a6f0c0a1b6e32a102cabf644
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: tollgate-gateway-config
+          env:
+            # Only vLLM needs a key; llama-server ignores it. Optional, so the gateway starts without it.
+            - name: TOLLGATE_UPSTREAM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-api-key
+                  key: VLLM_API_KEY
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
