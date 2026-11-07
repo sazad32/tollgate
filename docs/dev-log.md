@@ -2,6 +2,14 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 5: gateway skeleton
+- Changed: FastAPI gateway as a pass-through streaming proxy (ADR 0009): OpenAI errors, request IDs,
+  one safe retry, disconnects stop the model; image built in CI, 2 replicas in k3s.
+- Broke: anyio cancels the cleanup too unless shielded; PowerShell 5.1 treats docker's stderr as
+  errors; vLLM's start needs ~2.5 GB free RAM, so the browser had to close.
+- Measured: gateway adds 3–7 ms to first token, nothing per token; a disconnect stopped generation
+  after 49 of 400 tokens.
+
 ## 2026-11-07 — Week 4: benchmark (Phase 1 gate)
 - Changed: `tollgate_bench`, an asyncio + httpx benchmark run as an in-cluster Job (ADR 0008); results
   in `bench/RESULTS.md`; Phase 1 gate met, Phase 2 starts.

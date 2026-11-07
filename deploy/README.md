@@ -9,6 +9,7 @@ deploy/
   namespace.yaml         the tollgate namespace
   storage/               tollgate-local StorageClass, model-weight PVs, Prometheus PV (ADR 0006)
   llama-server/          StatefulSet (one replica per GPU node), Services, settings (ADR 0004, 0005)
+  gateway/               the API gateway: Deployment (2 replicas), Service, settings (ADR 0009)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
 ```
@@ -41,6 +42,22 @@ First start per node: the image is about 2.5 GB and the model 1.9 GB. Later star
 On a fresh cluster, run `kubectl apply -k deploy` **twice**. The first run creates the monitoring
 `HelmChart`, and k3s installs kube-prometheus-stack in a background Job. That Job brings the CRDs the
 PodMonitors and ServiceMonitors need, so they only apply on the second run.
+
+## The gateway
+The OpenAI-compatible entry point (ADR 0009), inside the cluster at
+`http://tollgate-gateway.tollgate.svc:8000/v1`. From the workstation:
+```powershell
+kubectl -n tollgate port-forward svc/tollgate-gateway 8000:8000
+curl.exe -s http://localhost:8000/v1/models
+```
+- **Where it forwards:** `TOLLGATE_UPSTREAM_URL` in `gateway/gateway.env` (the llama-server Service by
+  default). Change it and re-apply; the pods roll.
+- **Trying another upstream without editing Git:**
+  `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_UPSTREAM_URL=http://vllm-workstation.tollgate.svc:8000`,
+  then remove the override with `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_UPSTREAM_URL-`.
+  An explicit env var wins over the ConfigMap.
+- **Shipping a code change:** push the branch, wait for the *Gateway image* workflow, then put the new
+  `sha-<commit>@sha256:<digest>` in `gateway/deployment.yaml` and re-apply.
 
 ## Look at the dashboards
 ```powershell

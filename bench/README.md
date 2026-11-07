@@ -22,7 +22,8 @@ bench/
 ```
 
 ## Run it
-Targets: `node-2`, `node-1`, `both-nodes` (the `llama-server` Service), `vllm`.
+Targets: `node-2`, `node-1`, `both-nodes` (the `llama-server` Service), `vllm`, and `gateway`
+(whatever the gateway forwards to; name the run with `--label`, e.g. `--label "gateway -> vLLM"`).
 ```powershell
 # upload the client code (again after any change to it)
 kubectl -n tollgate create configmap bench-client --from-file=bench/src/tollgate_bench --dry-run=client -o yaml | kubectl apply -f -

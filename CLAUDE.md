@@ -56,7 +56,10 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   (needs 7.0+). Use CUDA 12 builds; CUDA 13 dropped this generation.
 - Workstation (Saimoon's Windows PC, outside the cluster): RTX 3060 Laptop GPU, 6 GB VRAM, compute
   capability 8.6, Docker Desktop on WSL2. Runs vLLM. Not always on. Windows uses 1–2 GB of this GPU for
-  the display, so vLLM gets about 4 GB.
+  the display, so vLLM gets about 4 GB. The PC has 15 GB of RAM; starting vLLM needs about 2.5 GB free on
+  top of Docker's VM, so close or cap the browser first. Run vLLM steps in the foreground, with a RAM check.
+- Gateway (ADR 0009): image `ghcr.io/sazad32/tollgate-gateway:sha-<commit>`, built by
+  `.github/workflows/gateway-image.yml` on `main` and `feat/**`; deploy pins it by digest.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -90,6 +93,8 @@ docker compose -f deploy/workstation/vllm/compose.yaml up -d     # vLLM on the w
 docker compose -f deploy/workstation/vllm/compose.yaml down      # stop vLLM, free the GPU
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80        # Grafana (Tollgate folder)
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090   # Prometheus, /targets
+kubectl -n tollgate port-forward svc/tollgate-gateway 8000:8000  # the gateway, http://localhost:8000/v1
+$env:TOLLGATE_UPSTREAM_URL="http://localhost:8080"; uv run uvicorn --factory tollgate_gateway.main:create_app --reload  # gateway locally
 uv run python -m tollgate_bench job node-2 | kubectl apply -f -   # benchmark a backend (see bench/README.md)
 uv run python -m tollgate_bench report bench/raw/*.jsonl         # Markdown results table from Job logs
 ```
