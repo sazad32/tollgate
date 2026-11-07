@@ -59,7 +59,7 @@ async def test_client_supplied_request_id_is_ignored(client: httpx.AsyncClient, 
 
 
 async def test_upstream_key_is_sent_and_the_clients_auth_is_not(
-    make_gateway, upstream, chat
+    make_gateway, upstream, chat, support_key
 ) -> None:
     app = make_gateway(upstream_api_key="upstream-secret")
     async with (
@@ -67,7 +67,7 @@ async def test_upstream_key_is_sent_and_the_clients_auth_is_not(
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://g") as http,
     ):
         await http.post(
-            "/v1/chat/completions", json=chat(), headers={"Authorization": "Bearer tenant-key"}
+            "/v1/chat/completions", json=chat(), headers={"Authorization": f"Bearer {support_key}"}
         )
 
     assert upstream.requests[-1].headers["authorization"] == "Bearer upstream-secret"

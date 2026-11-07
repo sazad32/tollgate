@@ -12,11 +12,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from tollgate_gateway.auth import Authenticator, AuthError
 from tollgate_gateway.config import Settings
+from tollgate_gateway.db import PostgresAuthStore, make_engine
+from tollgate_gateway.errors import openai_error
+from tollgate_gateway.jwt_auth import JwksCache, JwtValidator
 from tollgate_gateway.routes import router
+from tollgate_gateway.tenants import AuthStore
 from tollgate_gateway.upstream import make_client
 
 
@@ -49,21 +55,64 @@ class RequestIdMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.upstream = make_client(app.state.settings, app.state.upstream_transport)
+    settings: Settings = app.state.settings
+    app.state.upstream = make_client(settings, app.state.upstream_transport)
+    jwks_client = httpx.AsyncClient(transport=app.state.jwks_transport, timeout=5.0)
+    engine = None
+    store = app.state.auth_store
+    if store is None:
+        if settings.database_url is None:
+            raise RuntimeError(
+                "TOLLGATE_DATABASE_URL is required (tenants and API keys live there)"
+            )
+        engine = make_engine(settings.database_url.get_secret_value())
+        store = PostgresAuthStore(engine)
+    validator = None
+    if settings.oidc_issuer and settings.jwks_url:
+        validator = JwtValidator(
+            JwksCache(jwks_client, settings.jwks_url),
+            issuer=settings.oidc_issuer,
+            audience=settings.oidc_audience,
+        )
+    app.state.authenticator = Authenticator(
+        store,
+        settings.api_key_pepper.get_secret_value().encode(),
+        validator,
+        cache_ttl_s=settings.auth_cache_ttl_s,
+    )
     try:
         yield
     finally:
         await app.state.upstream.aclose()
+        await jwks_client.aclose()
+        if engine is not None:
+            await engine.dispose()
+
+
+async def auth_error_response(request: Request, exc: Exception) -> JSONResponse:
+    """Turn an AuthError raised by require_principal into an OpenAI-style error response."""
+    assert isinstance(exc, AuthError)
+    response = openai_error(exc.status, exc.message, "invalid_request_error", exc.code)
+    if exc.status == 401:
+        response.headers["WWW-Authenticate"] = "Bearer"
+    return response
 
 
 def create_app(
-    settings: Settings | None = None, upstream_transport: httpx.AsyncBaseTransport | None = None
+    settings: Settings | None = None,
+    upstream_transport: httpx.AsyncBaseTransport | None = None,
+    auth_store: AuthStore | None = None,
+    jwks_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
-    """Build the app. Tests pass settings and a fake upstream transport; Uvicorn passes neither."""
+    """Build the app. Tests pass settings and fakes for the model server, the tenant store and
+    Keycloak; Uvicorn passes none of them."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     app = FastAPI(title="Tollgate gateway", version="0.1.0", lifespan=lifespan)
-    app.state.settings = settings or Settings()
+    app.state.settings = settings or Settings()  # type: ignore[call-arg]  (env supplies the rest)
     app.state.upstream_transport = upstream_transport
+    app.state.auth_store = auth_store
+    app.state.jwks_transport = jwks_transport
     app.include_router(router)
+    app.add_exception_handler(AuthError, auth_error_response)
     app.add_middleware(RequestIdMiddleware)
     return app

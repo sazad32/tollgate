@@ -10,15 +10,18 @@ from typing import Any
 
 import anyio
 import httpx
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from tollgate_gateway.auth import require_principal
 from tollgate_gateway.errors import openai_error, sse_error_event, upstream_failure
 from tollgate_gateway.upstream import open_upstream
 
 log = logging.getLogger("tollgate.gateway")
-router = APIRouter()
+router = APIRouter()  # open: health checks only
+# Every /v1 route needs credentials (ADR 0010). Like [Authorize] on a controller.
+v1 = APIRouter(dependencies=[Depends(require_principal)])
 
 
 class ChatCompletionRequest(BaseModel):
@@ -45,7 +48,7 @@ async def readyz() -> dict[str, str]:
     return {"status": "ready"}
 
 
-@router.get("/v1/models")
+@v1.get("/v1/models")
 async def list_models(request: Request) -> Response:
     try:
         upstream = await open_upstream(
@@ -56,7 +59,7 @@ async def list_models(request: Request) -> Response:
     return await buffered(upstream)
 
 
-@router.post("/v1/chat/completions")
+@v1.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Response:
     request_id: str = request.state.request_id
     try:
@@ -135,3 +138,6 @@ async def buffered(upstream: httpx.Response) -> Response:
         status_code=upstream.status_code,
         media_type=upstream.headers.get("content-type", "application/json"),
     )
+
+
+router.include_router(v1)

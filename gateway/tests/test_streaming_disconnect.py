@@ -37,13 +37,17 @@ class HangingStream(httpx.AsyncByteStream):
         self.closed.set()
 
 
-async def test_client_disconnect_closes_the_upstream_stream() -> None:
+async def test_client_disconnect_closes_the_upstream_stream(auth_store, support_key) -> None:
     stream = HangingStream()
 
     async def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
 
-    app = create_app(Settings(upstream_url="http://upstream"), httpx.MockTransport(handle))
+    app = create_app(
+        Settings(upstream_url="http://upstream", api_key_pepper="test-pepper"),
+        upstream_transport=httpx.MockTransport(handle),
+        auth_store=auth_store,
+    )
     body = json.dumps(
         {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True}
     ).encode()
@@ -57,7 +61,11 @@ async def test_client_disconnect_closes_the_upstream_stream() -> None:
         "raw_path": b"/v1/chat/completions",
         "query_string": b"",
         "root_path": "",
-        "headers": [(b"content-type", b"application/json"), (b"host", b"gateway")],
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"host", b"gateway"),
+            (b"authorization", f"Bearer {support_key}".encode()),
+        ],
         "client": ("127.0.0.1", 50000),
         "server": ("gateway", 80),
     }
