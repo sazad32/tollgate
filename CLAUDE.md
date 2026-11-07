@@ -41,7 +41,10 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 ## Environment facts
 - node-1 and node-2 each advertise `nvidia.com/gpu: 1`. node-1 is the k3s server (control plane); node-2 is an agent.
 - k3s v1.35. node-1 runs Ubuntu 24.04 (kernel 6.8); node-2 runs Ubuntu 26.04 (kernel 7.0). NVIDIA driver
-  packages are on `apt-mark hold` on both nodes: update the driver and reboot together.
+  packages are on `apt-mark hold` on both nodes: update the driver and reboot together. node-2's core
+  tools are uutils (Rust coreutils): e.g. `install -g <number>` fails without a named group; use `chown`.
+- Monitoring (ADR 0007): kube-prometheus-stack in the `monitoring` namespace, installed by k3s's Helm
+  controller (`HelmChart`), so no Helm CLI is needed. Grafana's login is the hand-made `grafana-admin` Secret.
 - Already in the cluster: Traefik ingress, `local-path` provisioner (default StorageClass), metrics-server,
   NVIDIA device plugin. Tollgate uses its own `tollgate` namespace; leave `default` alone.
 - kubectl on the workstation uses the `tollgate` context (kubeconfig in the user's home, never in the repo).
@@ -85,6 +88,8 @@ kubectl -n tollgate get pods -o wide                             # llama-server:
 kubectl -n tollgate port-forward svc/llama-server 8080:8080      # call llama-server from the workstation
 docker compose -f deploy/workstation/vllm/compose.yaml up -d     # vLLM on the workstation (needs .env)
 docker compose -f deploy/workstation/vllm/compose.yaml down      # stop vLLM, free the GPU
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80        # Grafana (Tollgate folder)
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090   # Prometheus, /targets
 ```
 (Add new commands here as they are created.)
 

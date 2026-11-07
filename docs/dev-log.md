@@ -2,6 +2,14 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 3: monitoring
+- Changed: kube-prometheus-stack via k3s's Helm controller (ADR 0007); DCGM GPU exporter; scrape targets
+  for llama-server and vLLM (via a Service with no pods behind it); dashboards: Model servers, GPUs.
+- Broke: DCGM exporter OOM-killed at a 384 MiB limit (uses ~420); node-2's uutils `install` rejected a
+  numeric group; Grafana 13 is distroless, so no in-container checks.
+- Measured: 2 parallel requests ~double node output (26.5 / 20.4 tok/s); vLLM 359 tok/s at 4; monitoring
+  ~1.4 GB RAM; node-1 GPU peaked at 82 °C.
+
 ## 2026-11-03 — Week 2: model serving
 - Changed: SmolLM3-3B on every backend (ADR 0005); `tollgate-local` StorageClass with one PV per node
   (ADR 0006); llama-server StatefulSet, one pod per GPU node, plus Services; vLLM compose on the workstation.

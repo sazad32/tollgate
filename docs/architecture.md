@@ -29,7 +29,8 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | Redis | k3s StatefulSet | Rate-limit counters, queues, usage stream |
 | Postgres | k3s StatefulSet on node-2 storage | Ledger, pricing, invoices, tenants |
 | Keycloak | k3s Deployment | Its own Postgres schema |
-| Prometheus + Grafana | k3s, monitoring namespace | Metrics |
+| Prometheus + Grafana | k3s `monitoring` namespace, kube-prometheus-stack (ADR 0007) | Metrics on a local PV on node-2 |
+| DCGM exporter | k3s DaemonSet on GPU nodes (ADR 0007) | Stateless |
 | Dashboard | Phase 5 | Reads billing API |
 
 ## Key invariants
