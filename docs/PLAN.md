@@ -14,9 +14,9 @@
 - [x] Week 2: StorageClass for model weights; deploy `llama-server` with one replica per GPU node; vLLM in
   Docker on the workstation (ADR 0004, 0005, 0006)
 - [x] Week 3: Prometheus + Grafana; scrape model-server metrics (`llama-server`, vLLM) and GPU use (ADR 0007)
-- [ ] Week 4: Benchmark TTFT and tokens/sec at 1, 8, 32, 64 concurrent users on each backend; publish the table
+- [x] Week 4: Benchmark TTFT and tokens/sec at 1, 8, 32, 64 concurrent users on each backend; publish the table (ADR 0008)
 
-**Gate:** benchmark table published in `bench/RESULTS.md`.
+**Gate:** benchmark table published in `bench/RESULTS.md`. Met 2026-11-07.
 
 ## Phase 2 — Gateway (weeks 5–9)
 - [ ] Week 5: FastAPI skeleton, OpenAI-compatible `/v1/chat/completions`, streaming end to end to vLLM
