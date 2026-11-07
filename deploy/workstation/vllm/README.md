@@ -9,6 +9,10 @@ It holds most of the GPU, so it runs only when started on purpose.
 - A current WSL (`wsl --update`) and Docker Desktop. With Docker Desktop 4.30 (2024) the container saw
   the GPU in `nvidia-smi` but CUDA failed to start: `cudaGetDeviceCount ... Error 500: named symbol not
   found`. Updating Docker Desktop fixed it.
+- **About 2.5 GB of free system RAM** on top of what Docker's VM already holds, besides the GPU memory.
+  Measured on this 15 GB PC: Docker's VM grew by about 2 GB during startup. With a browser and Docker
+  already open, only about 3 GB was free, and a start pushed free RAM down to 0.55 GB within 40 s. Close
+  or cap the browser first (Opera GX: GX Control → RAM Limiter → hard limit).
 
 ## Run
 From this folder:

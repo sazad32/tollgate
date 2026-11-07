@@ -1,0 +1,13 @@
+# The gateway inside the cluster: http://tollgate-gateway.tollgate.svc:8000/v1
+# Not exposed outside the cluster yet; that waits for the week 17 security pass.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tollgate-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: tollgate-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

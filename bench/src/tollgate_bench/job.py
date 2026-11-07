@@ -24,11 +24,12 @@ def manifest(
     run_id: str,
     levels: tuple[int, ...] | None = None,
     requests: tuple[int, ...] | None = None,
+    label: str | None = None,
 ) -> dict:
     """The Job for `target`. `levels` and `requests` override the target's (smoke tests)."""
     args = [
         "run",
-        "--backend", target.backend,
+        "--backend", label or target.backend,
         "--url", target.url,
         "--model", MODEL,
         "--levels", ",".join(map(str, levels or target.levels)),

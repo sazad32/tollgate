@@ -1,0 +1,16 @@
+# Keep the image build context small, and keep secrets and local files out of it entirely.
+.git
+.github
+.venv
+**/__pycache__
+**/.pytest_cache
+.ruff_cache
+.env
+.env.*
+**/.env
+**/secrets/
+**/*.local.yaml
+bench/raw/
+deploy/
+docs/
+dashboard/
