@@ -5,3 +5,19 @@ resources:
   - kube-prometheus-stack.yaml
   - dcgm-exporter.yaml
   - model-servers.yaml
+# Dashboards as ConfigMaps. Grafana's sidecar loads any ConfigMap labelled grafana_dashboard: "1"
+# into the folder named by the grafana_folder annotation. No hash suffix: a renamed ConfigMap would
+# leave the old copy behind and Grafana would see the same dashboard twice.
+configMapGenerator:
+  - name: grafana-dashboards-tollgate
+    namespace: monitoring
+    files:
+      - dashboards/model-servers.json
+      - dashboards/gpus.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+        app.kubernetes.io/part-of: tollgate
+      annotations:
+        grafana_folder: Tollgate
