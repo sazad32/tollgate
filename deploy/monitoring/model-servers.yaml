@@ -1,0 +1,59 @@
+# Scrape targets for the model servers (ADR 0007). Every series gets a `backend` label so one dashboard
+# can show llama-server and vLLM side by side.
+
+# llama-server: each replica's /metrics (enabled with LLAMA_ARG_ENDPOINT_METRICS in week 2).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: llama-server
+  namespace: tollgate
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llama-server
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: backend
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+---
+# vLLM on the workstation, outside the cluster. A Service with no selector: Kubernetes doesn't look for
+# pods, and the address comes from a hand-made EndpointSlice that stays out of Git
+# (see deploy/workstation/vllm/endpointslice.example.yaml). Inside the cluster, vLLM is then reachable
+# as http://vllm-workstation.tollgate.svc:8000, which the week 8 router can use too.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-workstation
+  namespace: tollgate
+  labels:
+    app.kubernetes.io/name: vllm-workstation
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+# /metrics needs no API key. When the workstation is off, this target is simply down.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-workstation
+  namespace: tollgate
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm-workstation
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - targetLabel: backend
+          replacement: vllm-workstation
+        - targetLabel: node
+          replacement: workstation

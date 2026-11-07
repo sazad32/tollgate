@@ -1,0 +1,125 @@
+# Prometheus + Grafana via kube-prometheus-stack (ADR 0007).
+# Installed by k3s's built-in Helm controller: applying this object makes k3s run `helm install`
+# in a Job, so no Helm CLI is needed on the workstation. Change values here and re-apply to upgrade.
+# The chart also installs the Prometheus operator CRDs (ServiceMonitor, PodMonitor, ...). On a fresh
+# cluster, run `kubectl apply -k deploy` twice: the monitors in this folder need those CRDs first.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: kube-prometheus-stack
+  namespace: monitoring
+spec:
+  repo: https://prometheus-community.github.io/helm-charts
+  chart: kube-prometheus-stack
+  version: 92.22.0
+  targetNamespace: monitoring
+  valuesContent: |-
+    # --- k3s: these control-plane parts run inside the k3s process and don't expose metrics by
+    # default. Scraping them would only produce permanently-down targets.
+    kubeControllerManager:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeProxy:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+    defaultRules:
+      rules:
+        etcd: false
+        kubeControllerManager: false
+        kubeProxy: false
+        kubeSchedulerAlerting: false
+        kubeSchedulerRecording: false
+        windows: false
+
+    # --- No alert routing yet. Alert rules still evaluate and show in Prometheus' Alerts tab.
+    alertmanager:
+      enabled: false
+
+    prometheus:
+      prometheusSpec:
+        scrapeInterval: 15s
+        evaluationInterval: 15s
+        retention: 15d
+        retentionSize: 15GB
+        # Pick up every ServiceMonitor / PodMonitor in the cluster, not only ones labelled for this
+        # Helm release. Ours live in the tollgate and monitoring namespaces.
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelectorNilUsesHelmValues: false
+        ruleSelectorNilUsesHelmValues: false
+        # EndpointSlice discovery lets a hand-made EndpointSlice (vLLM on the workstation) be scraped.
+        serviceDiscoveryRole: EndpointSlice
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            memory: 1536Mi
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: tollgate-local
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 20Gi
+              selector:
+                matchLabels:
+                  tollgate/purpose: prometheus
+
+    grafana:
+      # Admin login comes from a Secret created by hand, never committed:
+      #   kubectl -n monitoring create secret generic grafana-admin \
+      #     --from-literal=admin-user=admin --from-literal=admin-password=<password>
+      admin:
+        existingSecret: grafana-admin
+        userKey: admin-user
+        passwordKey: admin-password
+      # No persistence: dashboards and the data source come from ConfigMaps in Git.
+      persistence:
+        enabled: false
+      sidecar:
+        dashboards:
+          # Load every ConfigMap labelled grafana_dashboard: "1", in any namespace.
+          label: grafana_dashboard
+          labelValue: "1"
+          searchNamespace: ALL
+          folderAnnotation: grafana_folder
+          provider:
+            foldersFromFilesStructure: true
+      grafana.ini:
+        analytics:
+          reporting_enabled: false
+          check_for_updates: false
+          check_for_plugin_updates: false
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 384Mi
+
+    prometheusOperator:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+
+    kube-state-metrics:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+
+    prometheus-node-exporter:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          memory: 128Mi

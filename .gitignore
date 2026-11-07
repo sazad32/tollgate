@@ -17,6 +17,8 @@ build/
 **/secrets/
 *.pem
 *.key
+# Local-only manifests (home-network addresses and the like)
+*.local.yaml
 
 # Local Claude Code settings (shared settings.json is committed)
 .claude/settings.local.json
