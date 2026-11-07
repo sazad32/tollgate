@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> None:
     p_job.add_argument("--run-id", default=time.strftime("%Y%m%d-%H%M%S"))
     p_job.add_argument("--levels", help="override the target's levels, e.g. 1,2")
     p_job.add_argument("--requests", help="override the target's requests per level")
+    p_job.add_argument("--label", help="override the backend label in the results")
 
     p_report = commands.add_parser("report", help="Markdown results table from Job logs")
     p_report.add_argument("files", nargs="+")
@@ -99,7 +100,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "job":
         levels = tuple(int(x) for x in args.levels.split(",")) if args.levels else None
         counts = tuple(int(x) for x in args.requests.split(",")) if args.requests else None
-        job = manifest(TARGETS[args.target], args.run_id, levels, counts)
+        job = manifest(TARGETS[args.target], args.run_id, levels, counts, args.label)
         print(json.dumps(job, indent=2))
     else:
         records = []

@@ -47,6 +47,14 @@ TARGETS = {
             gpu_nodes=("vps-node-1", "vps-node-2"),
         ),
         Target(
+            # Whatever the gateway is configured to forward to; label the run with --label.
+            name="gateway",
+            backend="gateway",
+            url="http://tollgate-gateway.tollgate.svc:8000",
+            client_node="vps-node-1",
+            gpu_nodes=("vps-node-1", "vps-node-2"),
+        ),
+        Target(
             name="vllm",
             backend="vLLM (workstation, RTX 3060 Laptop)",
             url="http://vllm-workstation.tollgate.svc:8000",
