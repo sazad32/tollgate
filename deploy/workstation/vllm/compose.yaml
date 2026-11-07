@@ -1,0 +1,55 @@
+# vLLM on the workstation (ADR 0004): RTX 3060 Laptop, 6 GB, outside the cluster, not always on.
+# Serves the same model name and OpenAI-compatible API as llama-server in k3s (ADR 0005).
+# Run from this folder: copy example.env to .env, set a key, then `docker compose up -d`.
+name: tollgate-vllm
+
+services:
+  vllm:
+    # Pinned by digest. v0.32.0 (2026-10-18), CUDA 13.0: needs a driver that supports CUDA 13.
+    image: vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+    # The image's entrypoint is `vllm serve`; these are its arguments.
+    command:
+      # SmolLM3-3B, 4-bit weights / 16-bit activations (W4A16). Pinned commit.
+      - aleada/SmolLM3-3B-W4A16
+      - --revision=fb7bf97138f85da5d293b4af67ae5bd083b5d3c2
+      - --tokenizer-revision=fb7bf97138f85da5d293b4af67ae5bd083b5d3c2
+      - --served-model-name=smollm3-3b
+      - --max-model-len=8192
+      # Fraction of the GPU's *total* 6 GB that vLLM may take. Windows uses 1.5-2 GB of this GPU for
+      # the display, and vLLM refuses to start if this asks for more than is free. Override in .env.
+      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.65}
+      - --max-num-seqs=32
+      # Thinking off by default, same as llama-server. A request can still turn it on.
+      - '--default-chat-template-kwargs={"enable_thinking": false}'
+    environment:
+      # Clients must send "Authorization: Bearer <key>". Set it in .env (never committed).
+      VLLM_API_KEY: ${VLLM_API_KEY:?set VLLM_API_KEY in .env}
+      # vLLM and Hugging Face send anonymous usage stats by default. Nothing leaves the network.
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    ports:
+      # Published on all host interfaces; the Windows firewall decides who on the LAN can reach it.
+      - "8000:8000"
+    volumes:
+      # Model downloads and vLLM's compiled-graph cache survive container restarts.
+      - hf-cache:/root/.cache/huggingface
+      - vllm-cache:/root/.cache/vllm
+    shm_size: 2gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10m
+    # No restart policy: it holds most of the GPU, so it runs only when started on purpose.
+
+volumes:
+  hf-cache:
+  vllm-cache:
