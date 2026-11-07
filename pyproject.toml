@@ -6,14 +6,15 @@ description = "Self-hosted AI platform: open models on local GPUs behind a meter
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["tollgate-gateway", "tollgate-billing"]
+dependencies = ["tollgate-gateway", "tollgate-billing", "tollgate-bench"]
 
 [tool.uv.workspace]
-members = ["gateway", "billing"]
+members = ["gateway", "billing", "bench"]
 
 [tool.uv.sources]
 tollgate-gateway = { workspace = true }
 tollgate-billing = { workspace = true }
+tollgate-bench = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -31,11 +32,13 @@ select = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["gateway/tests", "billing/tests"]
+testpaths = ["gateway/tests", "billing/tests", "bench/tests"]
 addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
+asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
     "ruff>=0.17.3",
 ]
