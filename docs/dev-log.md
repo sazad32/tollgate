@@ -2,6 +2,14 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 4: benchmark (Phase 1 gate)
+- Changed: `tollgate_bench`, an asyncio + httpx benchmark run as an in-cluster Job (ADR 0008); results
+  in `bench/RESULTS.md`; Phase 1 gate met, Phase 2 starts.
+- Broke: 6 of 936 requests hit a keep-alive race (llama-server and httpx both drop idle connections at
+  5 s); low memory on the workstation killed a background waiter.
+- Measured: per node ~20 / 17 tok/s, flat from 8 users; vLLM 113 → 1,103 tok/s; the Service balances
+  unevenly at 32+ users.
+
 ## 2026-11-07 — Week 3: monitoring
 - Changed: kube-prometheus-stack via k3s's Helm controller (ADR 0007); DCGM GPU exporter; scrape targets
   for llama-server and vLLM (via a Service with no pods behind it); dashboards: Model servers, GPUs.

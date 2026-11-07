@@ -12,7 +12,7 @@ This is a PUBLIC portfolio repo (Stage 1 of 3). Owner: Saimoon. Read `docs/PLAN.
 `docs/architecture.md` for the design, and `docs/adr/` for decisions already made.
 
 ## Current phase
-**Phase 1 — Serve a model (weeks 1–4).** Update this line at every gate.
+**Phase 2 — Gateway (weeks 5–9).** Phase 1 gate met 2026-11-07 (`bench/RESULTS.md`). Update this line at every gate.
 Do not build anything from a later phase unless asked.
 
 ## Repo layout (target)
@@ -21,7 +21,7 @@ gateway/      Python package `tollgate_gateway` — FastAPI gateway (Phase 2)
 billing/      Python package `tollgate_billing` — usage consumer, pricing, invoices (Phase 3)
 deploy/       k3s manifests (llama-server, later Redis, Postgres, Keycloak, monitoring), Helm chart (Phase 6),
               workstation/vllm/ Docker Compose for vLLM
-bench/        Load and benchmark scripts (k6 or Locust) + results
+bench/        Python package `tollgate_bench` — model-server benchmark (asyncio + httpx, ADR 0008) + RESULTS.md
 dashboard/    React + TypeScript (Phase 5 only)
 docs/         PLAN.md, architecture.md, adr/, dev-log.md
 ```
@@ -90,6 +90,8 @@ docker compose -f deploy/workstation/vllm/compose.yaml up -d     # vLLM on the w
 docker compose -f deploy/workstation/vllm/compose.yaml down      # stop vLLM, free the GPU
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80        # Grafana (Tollgate folder)
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090   # Prometheus, /targets
+uv run python -m tollgate_bench job node-2 | kubectl apply -f -   # benchmark a backend (see bench/README.md)
+uv run python -m tollgate_bench report bench/raw/*.jsonl         # Markdown results table from Job logs
 ```
 (Add new commands here as they are created.)
 
