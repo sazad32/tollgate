@@ -1,0 +1,92 @@
+# NVIDIA DCGM exporter: GPU metrics from every GPU node (ADR 0007).
+# NVIDIA officially supports datacenter GPUs only; tested here on the GTX 860M / 960M (Maxwell, GeForce).
+# Works: utilisation, VRAM, temperature, clocks. Not available on these cards: power and the
+# profiling metrics (DCGM_FI_PROF_*), so no SYS_ADMIN capability is needed.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-exporter
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        gpu: "true"
+      automountServiceAccountToken: false
+      containers:
+        - name: dcgm-exporter
+          # Pinned by digest. 4.9.0 (2026-11-06), ships DCGM 4.7.0.
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.9.0@sha256:2490e1dfb5baaee6765ef2841813af7d978bb459a566c22c326a8fc27c64eea9
+          env:
+            # See the node's GPU without requesting it: llama-server holds the node's only
+            # nvidia.com/gpu, and the exporter only reads metrics.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+            # Label each GPU metric with the pod using that GPU (via the kubelet's pod-resources API).
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 9400
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 10
+          securityContext:
+            # Root is needed to read the kubelet's pod-resources socket; no extra capabilities.
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Measured on these nodes: steady at 400-420 MiB after 10 minutes. A 384 MiB limit got it
+          # OOM-killed within seconds of starting, so the limit leaves about 50% headroom.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 384Mi
+            limits:
+              memory: 640Mi
+          volumeMounts:
+            - name: pod-gpu-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+      volumes:
+        - name: pod-gpu-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+      relabelings:
+        # Label series with the node, not the exporter pod's name.
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

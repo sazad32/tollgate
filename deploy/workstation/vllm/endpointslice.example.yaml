@@ -1,0 +1,22 @@
+# Tells the cluster where vLLM runs: the address behind the vllm-workstation Service
+# (deploy/monitoring/model-servers.yaml). Kept out of Git because it holds a home-network address.
+#   copy endpointslice.example.yaml endpointslice.local.yaml   (gitignored: *.local.yaml)
+#   replace the address below, then: kubectl apply -f endpointslice.local.yaml
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: vllm-workstation-1
+  namespace: tollgate
+  labels:
+    # Links this slice to the Service.
+    kubernetes.io/service-name: vllm-workstation
+    # Marks it as hand-managed so Kubernetes' own controller leaves it alone.
+    endpointslice.kubernetes.io/managed-by: tollgate-manual
+addressType: IPv4
+ports:
+  - name: http
+    port: 8000
+    protocol: TCP
+endpoints:
+  - addresses:
+      - "192.0.2.10" # replace with the workstation's LAN address
