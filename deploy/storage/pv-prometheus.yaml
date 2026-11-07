@@ -1,0 +1,28 @@
+# Prometheus data on node-2's data disk (ADR 0006, ADR 0007). Pins Prometheus to node-2.
+# One-time, needs sudo on vps-node-2. Prometheus runs as user 1000, group 2000:
+#   sudo mkdir -p /mnt/storage/tollgate/prometheus && sudo chown 1000:2000 /mnt/storage/tollgate/prometheus
+# (Not `install -d -o 1000 -g 2000`: Ubuntu 26.04's uutils `install` rejects a group number with no
+# matching group name.)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tollgate-prometheus-vps-node-2
+  labels:
+    app.kubernetes.io/part-of: tollgate
+    tollgate/purpose: prometheus
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: tollgate-local
+  local:
+    path: /mnt/storage/tollgate/prometheus
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [vps-node-2]
