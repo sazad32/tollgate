@@ -28,7 +28,7 @@ spec:
       containers:
         - name: migrate
           # Keep in step with deploy/billing/deployment.yaml.
-          image: ghcr.io/sazad32/tollgate-billing:sha-e654403@sha256:bc38053b8731f3c788aa00ad70201f64f2e3c9ae90fb1a22ada17bb242580098
+          image: ghcr.io/sazad32/tollgate-billing:sha-5943535@sha256:7908b8a2525dd28b86fe07aa8409707c9bdbbfb0c3c9cfb56ac9a7e60a05fad3
           command: ["python", "-m", "tollgate_billing", "migrate"]
           env:
             - name: TOLLGATE_BILLING_DATABASE_URL
