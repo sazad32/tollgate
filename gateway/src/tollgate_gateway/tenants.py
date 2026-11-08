@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+# May a tenant's requests leave the network? (ADR 0013)
+LOCAL_ONLY = "local_only"  # never: local model servers only (the default)
+HOSTED_ALLOWED = "hosted_allowed"  # yes: the hosted model, when asked for or when local is full
+DATA_POLICIES = (LOCAL_ONLY, HOSTED_ALLOWED)
+
 
 @dataclass(frozen=True)
 class Tenant:
@@ -17,9 +22,15 @@ class Tenant:
 
     id: str  # short slug, e.g. "support"; also the `tenant` claim in Keycloak tokens
     name: str
-    data_policy: str = "local_only"  # may requests leave the network? (week 8 router)
+    data_policy: str = LOCAL_ONLY
     tier: str = "standard"  # price and limit tier (weeks 7 and 12)
     disabled: bool = False
+
+    @property
+    def allows_hosted(self) -> bool:
+        """Only the exact value "hosted_allowed" lets a request leave the network. Anything else,
+        including a typo in the database, keeps it local: fail closed."""
+        return self.data_policy == HOSTED_ALLOWED
 
 
 @dataclass(frozen=True)
