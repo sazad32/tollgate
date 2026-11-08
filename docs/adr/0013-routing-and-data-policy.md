@@ -1,7 +1,7 @@
 # 0013 — Routing: local backends by load, the hosted model only where the data policy allows
 
 - Status: accepted
-- Date: 2026-11-08
+- Date: 2026-11-07
 
 ## Context
 Three local backends serve the same model (ADR 0005) at very different speeds: vLLM on the workstation

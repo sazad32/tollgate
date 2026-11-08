@@ -2,6 +2,16 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 8: router and data policy
+- Changed: the gateway routes by each backend's load, read from its /metrics every second: vLLM first,
+  then the node with most room, with failover. Claude, through the anthropic SDK, only for
+  hosted_allowed tenants, when asked for by name or when local is full (ADR 0013). 88 tests written first.
+- Broke: 5 concurrent streams split 1 and 4 across the nodes (requests were counted only once a backend
+  answered; now when sent); a rollout left both gateway replicas on node-2 (the spread rule now counts
+  per revision); httpx logged every poll.
+- Measured: vLLM took 6 of 6 concurrent requests, and stopping it caused no client errors; Claude
+  answered in under 2 s, for a fraction of a cent in all; the SDK adds ~45 MiB per gateway pod.
+
 ## 2026-11-07 — Week 7: token rate limits
 - Changed: per-tenant token bucket in Redis (atomic Lua); reserve an estimate, settle with real usage;
   429 with Retry-After and x-ratelimit headers; fail open without Redis (ADR 0012); Redis 8 in k3s.
