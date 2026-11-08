@@ -31,9 +31,9 @@
 - [x] Week 10: Usage event schema with idempotency keys, published to Redis Streams
 - [x] Week 11: Billing consumer writes a usage ledger in Postgres; partial and cancelled streams handled
 - [x] Week 12: Pricing tiers per model; monthly invoices per tenant
-- [ ] Week 13: Nightly reconciliation of ledger vs model-reported tokens; draft blog post 1
+- [x] Week 13: Nightly reconciliation of ledger vs model-reported tokens; draft blog post 1
 
-**Gate:** invoices match metered tokens exactly.
+**Gate:** invoices match metered tokens exactly. Met 2026-11-08 (bench/RESULTS.md, metering check; ADR 0018).
 
 ## Phase 4 — Reliability and security (weeks 14–17)
 - [ ] Week 14: Load tests; find where async Python breaks

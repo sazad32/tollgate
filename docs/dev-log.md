@@ -2,6 +2,16 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-08 — Week 13: reconciliation, blog draft (Phase 3 gate met)
+- Changed: a nightly CronJob checks each backend's ledger output tokens against the server's own
+  counter in Prometheus, and fails on a gap. A request audit (`tollgate_bench metering`,
+  `check-requests`) checks requests one by one. No automatic corrections (ADR 0018). Blog post 1
+  drafted.
+- Broke: llama-server's prompt counter skips cached tokens (1 of 75), so input can't be
+  reconciled. A PowerShell pipe added a BOM that the record reader refused.
+- Measured: 200 gate requests, all in the ledger, 180 exact. Hang-up estimates run 8.5% low
+  (332 vs 363). Previews equal the ledger. 488 tests pass.
+
 ## 2026-11-08 — Week 12: pricing and monthly invoices
 - Changed: prices per model now live in `deploy/billing/prices.toml` (rates as Decimal strings,
   with graduated bands). There is one invoice per tenant per month, built from the ledger rows

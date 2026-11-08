@@ -30,8 +30,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: billing
-          # Built by .github/workflows/billing-image.yml from commit 5943535. Pinned by digest.
-          image: ghcr.io/sazad32/tollgate-billing:sha-5943535@sha256:7908b8a2525dd28b86fe07aa8409707c9bdbbfb0c3c9cfb56ac9a7e60a05fad3
+          # Built by .github/workflows/billing-image.yml from commit a89d368. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-billing:sha-a89d368@sha256:17ccf9f22f336ecd611a68998db7d2e16eb69b8ae54157ddc1da3ddccf016026
           envFrom:
             - configMapRef:
                 name: tollgate-billing-config

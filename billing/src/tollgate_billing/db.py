@@ -7,6 +7,8 @@
   changed once written (ADR 0017).
 - invoice_items: which invoice each ledger row is on. Keyed by the ledger row, so Postgres itself
   refuses to put a row on two invoices.
+- reconciliations: each night's comparison of the ledger with the model servers' own token counters
+  (ADR 0018). A measurement, not money: running a day again replaces its result.
 
 .NET: SQLAlchemy declarative classes are EF Core entities; Alembic (migrations/) is EF migrations.
 """
@@ -158,6 +160,23 @@ class InvoiceItemRow(Base):
     )
     tenant_id: Mapped[str] = mapped_column(String(64))
     period: Mapped[date] = mapped_column(Date)
+
+
+class ReconciliationRow(Base):
+    __tablename__ = "reconciliations"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    backend: Mapped[str] = mapped_column(String(64), primary_key=True)
+    meter: Mapped[str] = mapped_column(String(6), primary_key=True)  # "output" (ADR 0018)
+    ledger_reported: Mapped[int] = mapped_column(BigInteger)
+    ledger_estimated: Mapped[int] = mapped_column(BigInteger)
+    server: Mapped[int | None] = mapped_column(BigInteger)  # None: no samples that day
+    allowed: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(16))
+    # The span compared: from the counter's sample before the day to its last sample in it.
+    since: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 def make_engine(database_url: str) -> AsyncEngine:

@@ -241,6 +241,23 @@ kubectl -n tollgate create job --from=cronjob/tollgate-billing-invoices invoices
   others do) or verify found a problem. `kubectl -n tollgate logs job/<name>` says which. Add the
   price, apply, and run the Job by hand.
 
+### Reconciliation
+Every night at 02:00 UTC, the CronJob `tollgate-billing-reconcile` compares yesterday's ledger with
+the model servers' own token counters in Prometheus (ADR 0018), and keeps the result in the
+`reconciliations` table. It compares output tokens only, per local backend.
+```powershell
+$billing = "kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing"
+Invoke-Expression "$billing reconcile --day 2026-11-09"                                  # any day (stored)
+Invoke-Expression "$billing reconcile --start 2026-11-09T10:00:00 --end 2026-11-09T11:00:00"  # any span (not stored)
+kubectl -n tollgate exec postgres-0 -- psql -U postgres -d billing -c "SELECT day, backend, ledger_reported + ledger_estimated AS ledger, server, status FROM reconciliations ORDER BY day DESC, backend"
+```
+- **A failed run** (the built-in `KubeJobFailed` alert) means a backend generated tokens the ledger
+  doesn't have, or the reverse. The log says which. Usually that's traffic that skipped the gateway:
+  a benchmark Job or a port-forward straight to a model server. Otherwise it's lost usage events.
+  Estimated tokens (hang-ups) may be off by half without failing.
+- **The backends** are listed in `TOLLGATE_BILLING_RECONCILE_BACKENDS` in `billing/billing.env`: add
+  one there when you add one to the gateway.
+
 ## Look at the dashboards
 ```powershell
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80

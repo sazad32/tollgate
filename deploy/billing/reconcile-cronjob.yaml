@@ -1,0 +1,64 @@
+# The nightly reconciliation (ADR 0018): at 02:00 UTC, compare yesterday's ledger with the model
+# servers' own token counters in Prometheus, and keep the result in billing's `reconciliations`
+# table. The Job fails on a gap, so kube-prometheus-stack's KubeJobFailed alert fires; the log says
+# which backend and what the gap means.
+# Run it by hand, e.g. for one day:
+#   kubectl -n tollgate create job --from=cronjob/tollgate-billing-reconcile reconcile-manual
+#   kubectl -n tollgate logs -f job/reconcile-manual
+#   kubectl -n tollgate delete job reconcile-manual
+# or for any day or span, from the billing pod:
+#   kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing reconcile --day 2026-11-08
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tollgate-billing-reconcile
+spec:
+  schedule: "0 2 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 43200 # cluster down at 02:00? Still run within 12 hours
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1 # a gap won't go away on a retry; Prometheus or Postgres restarting might
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: tollgate-billing-reconcile
+            app.kubernetes.io/component: billing
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reconcile
+              # Keep in step with deployment.yaml, migrate-job.yaml and cronjob.yaml.
+              image: ghcr.io/sazad32/tollgate-billing:sha-a89d368@sha256:17ccf9f22f336ecd611a68998db7d2e16eb69b8ae54157ddc1da3ddccf016026
+              command: ["python", "-m", "tollgate_billing", "reconcile"]
+              envFrom:
+                - configMapRef:
+                    name: tollgate-billing-config
+              env:
+                - name: TOLLGATE_BILLING_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: billing-db
+                      key: TOLLGATE_BILLING_DATABASE_URL
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 96Mi
+                limits:
+                  memory: 192Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
