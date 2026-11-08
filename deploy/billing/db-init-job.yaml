@@ -1,0 +1,72 @@
+# Create billing's own database and login in the shared Postgres (ADR 0011, ADR 0016): `billing`
+# owns the `billing` database and can't read the gateway's or Keycloak's. Idempotent: run it again
+# after recreating the billing-db Secret and it sets the new password.
+# Needs the billing-db Secret (deploy/README.md). Not part of `kubectl apply -k deploy`:
+#   kubectl apply -f deploy/billing/db-init-job.yaml
+#   kubectl -n tollgate wait --for=condition=complete job/billing-db-init --timeout=2m
+#   kubectl -n tollgate logs job/billing-db-init
+#   kubectl -n tollgate delete job billing-db-init
+# Passwords stay in Secrets: psql gets them as variables, and \gexec doesn't echo the statements.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: billing-db-init
+  namespace: tollgate
+  labels:
+    app.kubernetes.io/name: billing-db-init
+    app.kubernetes.io/part-of: tollgate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999 # the image's postgres user
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: psql
+          # The same image as deploy/postgres, for its psql.
+          image: postgres:18.6-bookworm@sha256:f1ea2a1a4fb7b68d4836be1fdcb8a6466a89b072158bf9d97663600538c294c5
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              psql -v ON_ERROR_STOP=1 -v pw="$BILLING_DB_PASSWORD" <<'SQL'
+              SELECT 'CREATE ROLE billing' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing') \gexec
+              SELECT format('ALTER ROLE billing WITH LOGIN PASSWORD %L', :'pw') \gexec
+              SELECT 'CREATE DATABASE billing OWNER billing' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'billing') \gexec
+              SELECT 'billing role and database ready' AS done;
+              SQL
+          env:
+            - name: PGHOST
+              value: postgres.tollgate.svc
+            - name: PGUSER
+              value: postgres
+            - name: PGDATABASE
+              value: postgres
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: BILLING_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: billing-db
+                  key: BILLING_DB_PASSWORD
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

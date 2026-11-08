@@ -9,4 +9,5 @@ resources:
   - redis
   - keycloak
   - gateway
+  - billing
   - monitoring
