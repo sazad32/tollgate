@@ -29,7 +29,7 @@ spec:
       containers:
         - name: migrate
           # Keep in step with deploy/gateway/deployment.yaml.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-36daa1b@sha256:4383f61362ae57f934a9abb33d31d3865984ddd20f8ae56197fdb6794f6439f8
+          image: ghcr.io/sazad32/tollgate-gateway:sha-9f62082@sha256:fc1806dd2b7310f6f398794f2aabc4c9a4a4a0afaae8ee5c72dc2cbc545d4d34
           command: ["python", "-m", "tollgate_gateway.admin", "migrate"]
           envFrom:
             - secretRef:
