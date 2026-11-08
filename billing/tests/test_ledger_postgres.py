@@ -153,3 +153,38 @@ async def test_the_migration_runs_both_ways(engine) -> None:
     assert not {"usage_ledger", "usage_rejects"} & await tables()
     await asyncio.to_thread(upgrade, URL)
     assert {"usage_ledger", "usage_rejects"} <= await tables()
+
+
+# --- end to end: the consumer with the real ledger -----------------------------------------------
+
+
+async def test_the_consumer_bills_each_event_once_in_postgres(engine, redis, event_fields) -> None:
+    from tollgate_billing.__main__ import status_lines
+    from tollgate_billing.consumer import Consumer
+
+    ids = [f"{n:032x}" for n in range(1, 4)]
+    for request_id in ids:
+        await redis.xadd("tollgate:usage", event_fields(request_id=request_id))
+    await redis.xadd("tollgate:usage", event_fields(request_id=ids[0]))  # a gateway retry's copy
+    await redis.xadd("tollgate:usage", event_fields(v="9"))  # one billing can't read
+    await redis.xadd(
+        "tollgate:usage",
+        event_fields(request_id=f"{9:032x}", tenant_id="engineering", status="failed"),
+    )
+
+    consumer = (
+        Consumer(PostgresLedger(engine), name="billing-test", block_ms=10)
+        if False
+        else Consumer(redis, PostgresLedger(engine), name="billing-test", block_ms=10)
+    )
+    assert await consumer.step() == 6
+    assert (consumer.inserted, consumer.duplicates, consumer.rejected) == (4, 1, 1)
+
+    lines = await status_lines(redis, engine, "tollgate:usage", "billing")
+    assert lines[0].startswith("stream tollgate:usage: 6 entries")
+    assert lines[1] == "group billing: 0 pending, 0 not yet read"
+    assert any("ledger: 4 rows" in line and "rejects: 1" in line for line in lines)
+    tenants = {line.split()[0]: line.split()[1:] for line in lines if line.startswith("  ")
+               and line.split()[0] in ("support", "engineering")}  # fmt: skip
+    assert tenants["support"] == ["3", "222", "180", "222", "180"]
+    assert tenants["engineering"] == ["1", "0", "0", "74", "60"]  # failed: measured, not billed
