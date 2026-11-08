@@ -108,6 +108,13 @@ class Authenticator:
         record, tenant = found
         principal = Principal(tenant=tenant, method="api_key", key_id=record.id)
         self._keys[key_hash] = (principal, now + self.cache_ttl_s)
+        if not tenant.disabled:
+            # "Last used" means accepted. Recorded on cache misses only (about once a minute per
+            # key), and never allowed to fail the request: it's bookkeeping.
+            try:
+                await self.store.mark_used(record.id)
+            except Exception as exc:
+                log.warning("could not record key use: %r", exc)
         return principal
 
     async def _by_jwt(self, token: str) -> Principal:

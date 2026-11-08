@@ -166,3 +166,14 @@ async def test_keycloak_outage_is_503_not_401(auth_store, make_token) -> None:
         error = await refused(authenticator, f"Bearer {make_token()}")
 
     assert (error.status, error.code) == (503, "auth_unavailable")
+
+
+async def test_only_accepted_keys_are_marked_as_used(authenticator, auth_store, support_key):
+    # "Last used" must mean "successfully used": a revoked key or a disabled tenant's key is
+    # looked up in the database too, but must not look active afterwards.
+    await authenticator.authenticate(f"Bearer {support_key}")
+    for refused_key in (REVOKED, LEGACY):
+        with pytest.raises(AuthError):
+            await authenticator.authenticate(f"Bearer {refused_key}")
+
+    assert auth_store.used == ["key-support"]

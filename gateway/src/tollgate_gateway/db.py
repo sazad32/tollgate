@@ -90,9 +90,11 @@ class PostgresAuthStore:
             if found is None:
                 return None
             key, tenant = found
-            # Recorded on cache misses only (about once a minute per key), not on every request.
+            return key.to_record(), tenant.to_tenant()
+
+    async def mark_used(self, key_id: str) -> None:
+        async with self.sessions() as session:
             await session.execute(
-                update(ApiKeyRow).where(ApiKeyRow.id == key.id).values(last_used_at=func.now())
+                update(ApiKeyRow).where(ApiKeyRow.id == key_id).values(last_used_at=func.now())
             )
             await session.commit()
-            return key.to_record(), tenant.to_tenant()

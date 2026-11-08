@@ -38,6 +38,8 @@ class AuthStore(Protocol):
 
     async def key_by_hash(self, key_hash: str) -> tuple[ApiKeyRecord, Tenant] | None: ...
 
+    async def mark_used(self, key_id: str) -> None: ...
+
 
 @dataclass
 class InMemoryAuthStore:
@@ -47,6 +49,7 @@ class InMemoryAuthStore:
     keys: dict[str, ApiKeyRecord] = field(default_factory=dict)  # by key_hash
     fail: bool = False
     calls: int = 0
+    used: list[str] = field(default_factory=list)  # key ids, in the order they were marked
 
     async def tenant(self, tenant_id: str) -> Tenant | None:
         self._touch()
@@ -58,6 +61,9 @@ class InMemoryAuthStore:
         if record is None:
             return None
         return record, self.tenants[record.tenant_id]
+
+    async def mark_used(self, key_id: str) -> None:
+        self.used.append(key_id)
 
     def _touch(self) -> None:
         self.calls += 1
