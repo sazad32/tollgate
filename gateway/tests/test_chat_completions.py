@@ -7,7 +7,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_stream_is_relayed_unchanged(client: httpx.AsyncClient, chat, sse_body) -> None:
-    response = await client.post("/v1/chat/completions", json=chat(stream=True))
+    # A client that asks for usage gets the stream byte for byte. (One that doesn't ask has the
+    # usage chunk removed again, since the gateway always requests it: test_rate_limit_api.py.)
+    body = chat(stream=True, stream_options={"include_usage": True})
+    response = await client.post("/v1/chat/completions", json=body)
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")

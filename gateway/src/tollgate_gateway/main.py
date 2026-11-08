@@ -7,13 +7,15 @@ IHostedService.StartAsync/StopAsync: code before `yield` runs at startup, after 
 """
 
 import logging
+import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tollgate_gateway.auth import Authenticator, AuthError
@@ -21,6 +23,7 @@ from tollgate_gateway.config import Settings
 from tollgate_gateway.db import PostgresAuthStore, make_engine
 from tollgate_gateway.errors import openai_error
 from tollgate_gateway.jwt_auth import JwksCache, JwtValidator
+from tollgate_gateway.limits import TokenBuckets
 from tollgate_gateway.routes import router
 from tollgate_gateway.tenants import AuthStore
 from tollgate_gateway.upstream import make_client
@@ -80,6 +83,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         validator,
         cache_ttl_s=settings.auth_cache_ttl_s,
     )
+
+    # Rate limits (ADR 0012). Short Redis timeouts: if Redis is down, fail open within half a second
+    # rather than holding every request up.
+    redis = app.state.redis_client
+    own_redis = False
+    if redis is None and settings.redis_url is not None:
+        redis = Redis.from_url(
+            settings.redis_url.get_secret_value(), socket_timeout=0.5, socket_connect_timeout=0.5
+        )
+        own_redis = True
+    if redis is None:
+        logging.getLogger("tollgate.gateway").warning("TOLLGATE_REDIS_URL not set: no rate limits")
+    app.state.buckets = TokenBuckets(redis, clock=app.state.clock) if redis is not None else None
     try:
         yield
     finally:
@@ -87,6 +103,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await jwks_client.aclose()
         if engine is not None:
             await engine.dispose()
+        if own_redis:
+            await redis.aclose()
 
 
 async def auth_error_response(request: Request, exc: Exception) -> JSONResponse:
@@ -103,15 +121,19 @@ def create_app(
     upstream_transport: httpx.AsyncBaseTransport | None = None,
     auth_store: AuthStore | None = None,
     jwks_transport: httpx.AsyncBaseTransport | None = None,
+    redis_client: Redis | None = None,
+    clock: Callable[[], float] = time.time,
 ) -> FastAPI:
-    """Build the app. Tests pass settings and fakes for the model server, the tenant store and
-    Keycloak; Uvicorn passes none of them."""
+    """Build the app. Tests pass settings and fakes for the model server, the tenant store,
+    Keycloak, Redis and the clock; Uvicorn passes none of them."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     app = FastAPI(title="Tollgate gateway", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings or Settings()  # type: ignore[call-arg]  (env supplies the rest)
     app.state.upstream_transport = upstream_transport
     app.state.auth_store = auth_store
     app.state.jwks_transport = jwks_transport
+    app.state.redis_client = redis_client
+    app.state.clock = clock
     app.include_router(router)
     app.add_exception_handler(AuthError, auth_error_response)
     app.add_middleware(RequestIdMiddleware)
