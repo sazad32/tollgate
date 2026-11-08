@@ -7,6 +7,7 @@ labels:
 resources:
   - deployment.yaml
   - cronjob.yaml
+  - reconcile-cronjob.yaml
 configMapGenerator:
   - name: tollgate-billing-config
     envs:
