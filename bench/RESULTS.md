@@ -164,3 +164,45 @@ uv run python -m tollgate_bench fairness --url http://localhost:8001 --trickle-u
   --label "fair queue on" --flood-key-env TG_FLOOD --trickle-key-env TG_TRICKLE > bench/raw/fairness-on.jsonl
 uv run python -m tollgate_bench report bench/raw/fairness-*.jsonl
 ```
+
+## Metered exactly: what the clients saw, what the ledger billed (week 13, Phase 3 gate)
+
+Measured on 2026-11-08, 21:09 to 21:12 UTC, with `python -m tollgate_bench metering` (ADR 0018).
+
+**Setup:**
+- The gateway in front of the two llama-server nodes (4 slots), vLLM off, nothing else running.
+- 100 requests each from `support` and `billing`, two at a time per tenant:
+  - half plain;
+  - four in ten streamed;
+  - one in ten streamed and hung up on after 5 chunks.
+- Each prompt is unique, with `max_tokens` 32 and `ignore_eos`, so each completed request generates
+  exactly 32 tokens.
+- Every client record carries the gateway's request ID (`X-Request-ID`) and the usage the client
+  was told.
+
+| Check | Result |
+| --- | --- |
+| Requests | 200 sent: 180 completed, 20 hung up, 0 errors, in 198 s |
+| Each request against its ledger row (`check-requests`) | All 200 found. The 180 completed requests were billed exactly the usage the client saw; the 20 hang-ups were billed their estimate. |
+| Ledger rows | 100 per tenant, 100 distinct keys each: none lost, none twice |
+| Ledger vs invoice preview | Equal for both tenants: support 10,539 in / 3,419 out, billing 9,410 / 3,047 (November so far) |
+| Ledger vs the servers' own counters, output (`reconcile`) | llama-server-0: 3,323 vs 3,338. llama-server-1: 2,769 vs 2,785. Total: ledger 6,092, servers 6,123, +31 |
+
+**What it says:**
+- **Completed requests are metered exactly.** The ledger's reported output is 5,760 = 180 × 32,
+  and the servers' counters agree.
+- **The whole difference (+31 tokens) is the 20 hang-ups.** They generated 363 tokens and were
+  estimated at 332, about 8.5% low: tokens still in flight when the gateway cancelled. That's within
+  the reconciliation's tolerance (half of the estimated tokens, 165).
+- **Input tokens can't be checked this way.** llama-server's prompt counter skips prompt tokens it
+  had cached, so it saw far fewer than the requests' real prompts. The ledger's input comes from
+  the server's own usage report, which the audit matched request by request.
+
+To run it again (each tenant's API key in an environment variable, a port-forward to the gateway
+on 8000; the run's start and end times are in its log):
+```
+uv run python -m tollgate_bench metering --url http://localhost:8000 --key support=TG_SUPPORT \
+  --key billing=TG_BILLING > bench/raw/metering.jsonl
+kubectl -n tollgate exec -i deploy/tollgate-billing -- python -m tollgate_billing check-requests < bench/raw/metering.jsonl
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing reconcile --start <start> --end <end, 30 s after the run>
+```

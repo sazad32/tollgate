@@ -18,6 +18,7 @@ bench/
     gpu.py        GPU temperature and clock per level, from Prometheus
     report.py     Job logs -> the Markdown table
     fairness.py   two tenants through the gateway: a burst and a trickle (week 9)
+    metering.py   a request mix through the gateway, recorded per request ID, for billing's audit (week 13)
   tests/          no network needed: a fake streaming server (httpx.MockTransport)
   raw/            Job logs, one JSON object per line (gitignored)
 ```
@@ -61,6 +62,23 @@ uv run python -m tollgate_bench report bench/raw/fairness-*.jsonl
 ```
 For the "off" run: `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_FAIR_QUEUE=false`, then
 remove it again with `TOLLGATE_FAIR_QUEUE-`. Wait a minute between runs, so token buckets refill.
+
+## Metering check
+`metering` sends each tenant's share of a request mix through the gateway (half plain, four in ten
+streamed, one in ten hung up on after 5 chunks) and writes one JSON line per request: the gateway's
+request ID and the usage the client was told. Billing then checks every line against its ledger
+row, and the run's span against the model servers' counters (ADR 0018; results at the end of
+RESULTS.md). It needs an API key for each tenant (revoke them afterwards) and a port-forward to the
+gateway:
+```powershell
+kubectl -n tollgate port-forward svc/tollgate-gateway 8000:8000
+$env:TG_SUPPORT = "<support key>"; $env:TG_BILLING = "<billing key>"
+uv run python -m tollgate_bench metering --url http://localhost:8000 --key support=TG_SUPPORT --key billing=TG_BILLING > bench/raw/metering.jsonl
+Get-Content bench/raw/metering.jsonl | kubectl -n tollgate exec -i deploy/tollgate-billing -- python -m tollgate_billing check-requests
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing reconcile --start <start> --end <end>
+```
+Give `reconcile` the run's start, and an end at least 30 s after the run, so Prometheus has scraped
+the servers' counters once more.
 
 ## Later
 - **Phase 4:** run the same client through the gateway and record the overhead, before and after tuning.
