@@ -340,3 +340,54 @@ async def test_the_invoice_migration_runs_both_ways(engine) -> None:
     assert "usage_ledger" in await tables()
     await asyncio.to_thread(upgrade, URL)
     assert invoice_tables <= await tables()
+
+
+# --- the commands ---------------------------------------------------------------------------------
+
+
+async def cli(tmp_path, *argv: str, now: datetime = AFTER_OCTOBER) -> int:
+    """Run `python -m tollgate_billing invoice ...` in-process, at a fixed time."""
+    from tollgate_billing.__main__ import invoice, parser
+    from tollgate_billing.config import Settings
+
+    path = tmp_path / "prices.toml"
+    path.write_text(PRICE_TEXT)
+    settings = Settings(database_url=URL, prices_file=path)
+    return await invoice(settings, parser().parse_args(["invoice", *argv]), now)
+
+
+async def test_finalize_command_does_last_month_then_verifies(engine, tmp_path, capsys) -> None:
+    await october_usage(engine)
+
+    assert await cli(tmp_path, "finalize") == 0
+    out = capsys.readouterr().out
+    assert "finalized 2026-10 support: USD 4.20 for 3 requests" in out
+    assert "verify 2026-10: every ledger row recorded in it is on its tenant's invoice" in out
+
+    assert await cli(tmp_path, "show", "support", "2026-10") == 0
+    assert "total USD 4.20 for 3 requests" in capsys.readouterr().out
+    assert await cli(tmp_path, "list") == 0
+    assert "engineering" in capsys.readouterr().out
+
+
+async def test_finalize_command_fails_while_a_tenant_waits(engine, tmp_path, capsys) -> None:
+    await add(engine, ledger_row(8, oct_(9), model="mystery-model"))
+
+    assert await cli(tmp_path, "finalize") == 1
+    captured = capsys.readouterr()
+    assert "not finalized 2026-10 support: no price for mystery-model" in captured.out
+    assert "verify: support: no invoice for 2026-10" in captured.err
+
+
+async def test_the_finalize_command_refuses_this_month(engine, tmp_path, capsys) -> None:
+    assert await cli(tmp_path, "finalize", "--month", "2026-11") == 1
+    assert "2026-11 hasn't ended" in capsys.readouterr().err
+
+
+async def test_preview_shows_this_month_so_far(engine, tmp_path, capsys) -> None:
+    await add(engine, ledger_row(9, datetime(2026, 11, 5, tzinfo=UTC)))
+
+    assert await cli(tmp_path, "preview", "support", now=datetime(2026, 11, 8, tzinfo=UTC)) == 0
+    out = capsys.readouterr().out
+    assert "invoice 2026-11 support (draft: not final until the month ends)" in out
+    assert "total USD 1.40 for 1 requests" in out  # 2M in at 0.10 + 3M out at 0.40
