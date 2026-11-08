@@ -2,6 +2,14 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-08 — Week 12: pricing and monthly invoices
+- Changed: prices per model now live in `deploy/billing/prices.toml` (rates as Decimal strings,
+  with graduated bands). There is one invoice per tenant per month, built from the ledger rows
+  recorded that month. A CronJob finalizes and verifies it on the 1st (ADR 0017).
+- Broke: `Decimal.normalize()` showed the rate 22.00 as `22`, and would have shown 20.00 as `2E+1`.
+- Measured: all 441 tests pass. Of 12 planted bugs, 11 were caught; the 12th changed nothing a test
+  could see. November's previews match the ledger exactly, at USD 0.00 each.
+
 ## 2026-11-08 — Week 11: billing consumer and usage ledger
 - Changed: billing reads `tollgate:usage` as the consumer group `billing` and writes each event
   once to `usage_ledger`. The ledger is keyed by the idempotency key, and billing acknowledges only

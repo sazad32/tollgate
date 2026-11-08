@@ -43,7 +43,8 @@ def schema() -> None:
 async def engine(schema):
     engine = make_engine(URL)
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE usage_ledger, usage_rejects"))
+        # CASCADE: invoice_items (ADR 0017) points at ledger rows
+        await conn.execute(text("TRUNCATE usage_ledger, usage_rejects CASCADE"))
     yield engine
     await engine.dispose()
 

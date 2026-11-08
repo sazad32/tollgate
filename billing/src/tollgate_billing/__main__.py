@@ -3,6 +3,15 @@
 python -m tollgate_billing run       the consumer: usage events from Redis into the ledger
 python -m tollgate_billing migrate   apply the ledger's database migrations
 python -m tollgate_billing status    stream, consumer group and ledger at a glance
+python -m tollgate_billing invoice   monthly invoices (ADR 0017); needs the price file:
+  invoice preview <tenant> [--month YYYY-MM]   the invoice so far (default: this month)
+  invoice finalize [--month YYYY-MM]           store every tenant's invoice for an ended month
+                                               (default: last month), then verify it
+  invoice show <tenant> <YYYY-MM>              a finalized invoice
+  invoice list [--month YYYY-MM]               finalized invoices
+  invoice verify [--month YYYY-MM]             every ledger row on exactly one invoice, and each
+                                               invoice matches the ledger and the prices
+                                               (default: last month)
 
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status
 """
@@ -12,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import sys
 from datetime import UTC, datetime
 
 from redis.asyncio import Redis
@@ -21,8 +31,19 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tollgate_billing.config import Settings
 from tollgate_billing.consumer import Consumer
 from tollgate_billing.db import LedgerRow, RejectRow, make_engine
+from tollgate_billing.invoices import (
+    FinalizeResult,
+    InvoiceError,
+    finalize,
+    list_invoices,
+    preview,
+    stored_invoice,
+    verify,
+)
+from tollgate_billing.invoicing import describe
 from tollgate_billing.ledger import PostgresLedger
 from tollgate_billing.migrate import upgrade
+from tollgate_billing.months import Month
 
 log = logging.getLogger("tollgate.billing")
 
@@ -139,11 +160,106 @@ async def status(settings: Settings) -> None:
         await engine.dispose()
 
 
-def main(argv: list[str] | None = None) -> None:
+def finalize_lines(result: FinalizeResult) -> list[str]:
+    out = [
+        f"finalized {d.month} {d.tenant_id}: {d.currency} {d.total} for {d.requests:,} requests"
+        for d in result.finalized
+    ]
+    if result.already:
+        out.append(f"already finalized for {result.month}: {', '.join(result.already)}")
+    for tenant, models in sorted(result.unpriced.items()):
+        out.append(f"not finalized {result.month} {tenant}: no price for {', '.join(models)}; "
+                   f"add it to prices.toml, then run finalize again")  # fmt: skip
+    if not (result.finalized or result.already or result.unpriced):
+        out.append(f"nothing to invoice for {result.month}: no ledger rows were recorded in it")
+    return out
+
+
+async def invoice(settings: Settings, args: argparse.Namespace, now: datetime) -> int:
+    """The invoice commands. Returns the exit code."""
+    prices = settings.require_prices()
+    engine = make_engine(settings.require_database_url())
+    try:
+        if args.action == "preview":
+            draft = await preview(engine, prices, args.tenant, args.month or Month.of(now))
+            print("\n".join(describe(draft)))
+            return 0
+        if args.action == "show":
+            found = await stored_invoice(engine, args.tenant, args.month)
+            if found is None:
+                print(f"no finalized invoice for {args.tenant} in {args.month}", file=sys.stderr)
+                return 1
+            print("\n".join(describe(found.draft, found.finalized_at)))
+            return 0
+        if args.action == "list":
+            invoices = await list_invoices(engine, args.month)
+            print(f"  {'month':<9}{'tenant':<16}{'requests':>10}{'tokens in':>14}{'tokens out':>14}"
+                  f"{'total':>14}  finalized")  # fmt: skip
+            for i in invoices:
+                d = i.draft
+                print(f"  {d.month!s:<9}{d.tenant_id:<16}{d.requests:>10,}{d.input_tokens:>14,}"
+                      f"{d.output_tokens:>14,}{f'{d.currency} {i.total}':>14}"
+                      f"  {i.finalized_at:%Y-%m-%d %H:%M} UTC")  # fmt: skip
+            if not invoices:
+                print("  no invoices")
+            return 0
+
+        # finalize and verify: last month unless told otherwise
+        month = args.month or Month.of(now).previous()
+        code = 0
+        if args.action == "finalize":
+            try:
+                result = await finalize(engine, prices, month, now=now)
+            except InvoiceError as e:
+                print(e, file=sys.stderr)
+                return 1
+            print("\n".join(finalize_lines(result)))
+            code = 1 if result.unpriced else 0  # a tenant left uninvoiced needs a person
+        problems = await verify(engine, prices, month)
+        for problem in problems:
+            print(f"verify: {problem}", file=sys.stderr)
+        if problems:
+            return 1
+        print(f"verify {month}: every ledger row recorded in it is on its tenant's invoice, and "
+              f"each invoice matches the ledger and the price list")  # fmt: skip
+        return code
+    finally:
+        await engine.dispose()
+
+
+def month_arg(text: str) -> Month:
+    try:
+        return Month.parse(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m tollgate_billing", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)  # fmt: skip
-    p.add_argument("command", choices=["run", "migrate", "status"])
-    args = p.parse_args(argv)
+    commands = p.add_subparsers(dest="command", required=True)
+    commands.add_parser("run", help="the consumer: usage events from Redis into the ledger")
+    commands.add_parser("migrate", help="apply the database migrations")
+    commands.add_parser("status", help="stream, consumer group and ledger at a glance")
+    actions = commands.add_parser("invoice", help="monthly invoices").add_subparsers(
+        dest="action", required=True
+    )
+    a = actions.add_parser("preview", help="a tenant's invoice so far (default: this month)")
+    a.add_argument("tenant")
+    a.add_argument("--month", type=month_arg)
+    a = actions.add_parser("finalize", help="store invoices for an ended month, then verify")
+    a.add_argument("--month", type=month_arg)
+    a = actions.add_parser("show", help="a finalized invoice")
+    a.add_argument("tenant")
+    a.add_argument("month", type=month_arg)
+    actions.add_parser("list", help="finalized invoices").add_argument("--month", type=month_arg)
+    a = actions.add_parser("verify", help="check a month's invoices against the ledger")
+    a.add_argument("--month", type=month_arg)
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings()
     if args.command == "migrate":
@@ -151,6 +267,10 @@ def main(argv: list[str] | None = None) -> None:
         print("schema is up to date")
     elif args.command == "status":
         asyncio.run(status(settings))
+    elif args.command == "invoice":
+        code = asyncio.run(invoice(settings, args, datetime.now(UTC)))
+        if code:
+            raise SystemExit(code)
     else:
         asyncio.run(run(settings))
 

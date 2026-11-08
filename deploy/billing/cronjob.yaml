@@ -1,0 +1,70 @@
+# The monthly invoices (ADR 0017): at 06:00 UTC on the 1st, finalize last month's invoice for every
+# tenant, then verify them against the ledger and the price list. Safe to run again: an invoice
+# already made is left alone. The Job fails (and shows as failed) if a tenant used a model with no
+# price, or verify finds a problem; the log says which.
+# Run it by hand, e.g. after adding a missing price to prices.toml and re-applying:
+#   kubectl -n tollgate create job --from=cronjob/tollgate-billing-invoices invoices-manual
+#   kubectl -n tollgate logs -f job/invoices-manual
+#   kubectl -n tollgate delete job invoices-manual
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tollgate-billing-invoices
+spec:
+  schedule: "0 6 1 * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid # two at once would also be safe (the ledger lock), but pointless
+  startingDeadlineSeconds: 86400 # cluster down at 06:00? Still run later that day
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2 # Postgres may be restarting; finalize is idempotent, so a retry is safe
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: tollgate-billing-invoices
+            app.kubernetes.io/component: billing
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: invoices
+              # Keep in step with deployment.yaml and migrate-job.yaml.
+              image: ghcr.io/sazad32/tollgate-billing:sha-5943535@sha256:7908b8a2525dd28b86fe07aa8409707c9bdbbfb0c3c9cfb56ac9a7e60a05fad3
+              command: ["python", "-m", "tollgate_billing", "invoice", "finalize"]
+              envFrom:
+                - configMapRef:
+                    name: tollgate-billing-config
+              env:
+                - name: TOLLGATE_BILLING_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: billing-db
+                      key: TOLLGATE_BILLING_DATABASE_URL
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 96Mi
+                limits:
+                  memory: 192Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: prices
+                  mountPath: /etc/tollgate
+                  readOnly: true
+          volumes:
+            - name: prices
+              configMap:
+                name: tollgate-billing-prices

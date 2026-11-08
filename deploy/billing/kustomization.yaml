@@ -6,7 +6,13 @@ labels:
       app.kubernetes.io/part-of: tollgate
 resources:
   - deployment.yaml
+  - cronjob.yaml
 configMapGenerator:
   - name: tollgate-billing-config
     envs:
       - billing.env
+  # The price list (ADR 0017). The name gets a hash of the content, so a price change rolls the pod
+  # and the next CronJob run reads the new file.
+  - name: tollgate-billing-prices
+    files:
+      - prices.toml

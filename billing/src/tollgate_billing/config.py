@@ -9,6 +9,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tollgate_billing.prices import PriceFileError, PriceList, load_prices
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TOLLGATE_BILLING_")
@@ -31,6 +33,8 @@ class Settings(BaseSettings):
     stale_consumer_s: float = 3600.0  # a consumer idle this long, owing nothing, is forgotten
     # Touched on every pass of the loop; the liveness probe checks its age. Unset: none.
     heartbeat_file: Path | None = None
+    # The price list for the invoice commands (ADR 0017; deploy/billing/prices.toml).
+    prices_file: Path | None = None
 
     def require_database_url(self) -> str:
         if self.database_url is None:
@@ -41,3 +45,11 @@ class Settings(BaseSettings):
         if self.redis_url is None:
             raise SystemExit("TOLLGATE_BILLING_REDIS_URL is not set")
         return self.redis_url.get_secret_value()
+
+    def require_prices(self) -> PriceList:
+        if self.prices_file is None:
+            raise SystemExit("TOLLGATE_BILLING_PRICES_FILE is not set")
+        try:
+            return load_prices(self.prices_file)
+        except (OSError, PriceFileError) as e:
+            raise SystemExit(f"{self.prices_file}: {e}") from None
