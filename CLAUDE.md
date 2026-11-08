@@ -59,7 +59,12 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   the display, so vLLM gets about 4 GB. The PC has 15 GB of RAM; starting vLLM needs about 2.5 GB free on
   top of Docker's VM, so close or cap the browser first. Run vLLM steps in the foreground, with a RAM check.
 - Gateway (ADR 0009): image `ghcr.io/sazad32/tollgate-gateway:sha-<commit>`, built by
-  `.github/workflows/gateway-image.yml` on `main` and `feat/**`; deploy pins it by digest.
+  `.github/workflows/gateway-image.yml` on `main` and `feat/**`; deploy pins it by digest (in both
+  `deployment.yaml` and `migrate-job.yaml`).
+- Auth (ADR 0010): every `/v1` call needs a tenant API key (`tg_…`) or a Keycloak token. Tenants `support`
+  and `billing` exist. Postgres 18 (`postgres-0`, node-2) holds tenants and keys (ADR 0011); Keycloak 26
+  issues tokens (realm `tollgate`). Secrets `postgres-credentials`, `keycloak-admin`, `keycloak-clients`,
+  `gateway-auth` are hand-made (see deploy/README.md); creating Secrets is the user's step, not Claude's.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -94,7 +99,9 @@ docker compose -f deploy/workstation/vllm/compose.yaml down      # stop vLLM, fr
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80        # Grafana (Tollgate folder)
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090   # Prometheus, /targets
 kubectl -n tollgate port-forward svc/tollgate-gateway 8000:8000  # the gateway, http://localhost:8000/v1
-$env:TOLLGATE_UPSTREAM_URL="http://localhost:8080"; uv run uvicorn --factory tollgate_gateway.main:create_app --reload  # gateway locally
+kubectl -n tollgate exec deploy/tollgate-gateway -- python -m tollgate_gateway.admin tenant list   # also: key create|list|revoke
+kubectl apply -f deploy/gateway/migrate-job.yaml   # schema migrations, once per release (then delete the Job)
+uv run uvicorn --factory tollgate_gateway.main:create_app --reload  # gateway locally; needs TOLLGATE_API_KEY_PEPPER and TOLLGATE_DATABASE_URL
 uv run python -m tollgate_bench job node-2 | kubectl apply -f -   # benchmark a backend (see bench/README.md)
 uv run python -m tollgate_bench report bench/raw/*.jsonl         # Markdown results table from Job logs
 ```

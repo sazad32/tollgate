@@ -4,3 +4,4 @@ resources:
   - storageclass.yaml
   - pv-models.yaml
   - pv-prometheus.yaml
+  - pv-postgres.yaml

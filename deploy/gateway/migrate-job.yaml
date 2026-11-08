@@ -1,0 +1,47 @@
+# Apply database migrations (ADR 0011), once per release, before the new gateway serves traffic.
+# A Job rather than an init container: with 2 gateway replicas, two pods migrating at once would race.
+# Not part of `kubectl apply -k deploy`. Run it by hand, with the same image as deployment.yaml:
+#   kubectl apply -f deploy/gateway/migrate-job.yaml
+#   kubectl -n tollgate wait --for=condition=complete job/gateway-migrate --timeout=2m
+#   kubectl -n tollgate logs job/gateway-migrate
+#   kubectl -n tollgate delete job gateway-migrate      # a Job's name can't be reused until deleted
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gateway-migrate
+  namespace: tollgate
+  labels:
+    app.kubernetes.io/name: gateway-migrate
+    app.kubernetes.io/part-of: tollgate
+spec:
+  backoffLimit: 2 # Postgres may still be starting; a migration is idempotent, so a retry is safe
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # Keep in step with deploy/gateway/deployment.yaml.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-df3b98c@sha256:cc4424194dbe6117a5845de10bdb00cb05d0381a500d481bceaecd59eadcaa71
+          command: ["python", "-m", "tollgate_gateway.admin", "migrate"]
+          envFrom:
+            - secretRef:
+                name: gateway-auth
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

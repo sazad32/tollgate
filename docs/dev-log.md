@@ -2,6 +2,14 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 6: tenant authentication
+- Changed: /v1 now needs a tenant API key (HMAC-hashed) or a Keycloak token (ADR 0010); Postgres 18 and
+  Keycloak 26 in k3s (ADR 0011); migration Job, admin CLI; 47 tests written first.
+- Broke: "last used" was stamped on revoked keys (fixed); both gateway replicas landed on node-2 (spread
+  is now a hard rule); a pasted secrets command split across two lines.
+- Measured: cached auth adds nothing measurable, a cache miss 35–170 ms; revocation bites within 60 s;
+  Keycloak uses 571 MiB of RAM.
+
 ## 2026-11-07 — Week 5: gateway skeleton
 - Changed: FastAPI gateway as a pass-through streaming proxy (ADR 0009): OpenAI errors, request IDs,
   one safe retry, disconnects stop the model; image built in CI, 2 replicas in k3s.

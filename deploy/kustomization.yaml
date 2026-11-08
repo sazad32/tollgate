@@ -5,5 +5,7 @@ resources:
   - namespace.yaml
   - storage
   - llama-server
+  - postgres
+  - keycloak
   - gateway
   - monitoring

@@ -20,11 +20,13 @@ spec:
         app.kubernetes.io/component: gateway
         app.kubernetes.io/part-of: tollgate
     spec:
-      # One replica per node when possible, so losing a node leaves one running.
+      # One replica per node, so losing a node leaves one running. A hard rule: as a mere preference
+      # (ScheduleAnyway) the scheduler put both on node-2 once Keycloak took memory on node-1.
+      # During a rollout the third (surge) pod still fits: 2 on one node, 1 on the other is skew 1.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
+          whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: tollgate-gateway
@@ -39,14 +41,17 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          # Built by .github/workflows/gateway-image.yml from commit a0d60c8. Pinned by digest.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-a0d60c8@sha256:be90511aecbf0b41929940d3c09850ff86d8b901a6f0c0a1b6e32a102cabf644
+          # Built by .github/workflows/gateway-image.yml from commit df3b98c. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-df3b98c@sha256:cc4424194dbe6117a5845de10bdb00cb05d0381a500d481bceaecd59eadcaa71
           ports:
             - name: http
               containerPort: 8000
           envFrom:
             - configMapRef:
                 name: tollgate-gateway-config
+            # TOLLGATE_API_KEY_PEPPER and TOLLGATE_DATABASE_URL (ADR 0010). Made by hand, never in Git.
+            - secretRef:
+                name: gateway-auth
           env:
             # Only vLLM needs a key; llama-server ignores it. Optional, so the gateway starts without it.
             - name: TOLLGATE_UPSTREAM_API_KEY

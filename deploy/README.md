@@ -7,9 +7,11 @@ Compose setup for vLLM on the workstation.
 deploy/
   kustomization.yaml     everything Tollgate runs in k3s
   namespace.yaml         the tollgate namespace
-  storage/               tollgate-local StorageClass, model-weight PVs, Prometheus PV (ADR 0006)
+  storage/               tollgate-local StorageClass and the PVs: models, Prometheus, Postgres (ADR 0006)
   llama-server/          StatefulSet (one replica per GPU node), Services, settings (ADR 0004, 0005)
-  gateway/               the API gateway: Deployment (2 replicas), Service, settings (ADR 0009)
+  postgres/              Postgres 18: databases for the gateway and Keycloak (ADR 0011)
+  keycloak/              Keycloak 26 and the tollgate realm export (ADR 0003, 0010)
+  gateway/               the API gateway: Deployment (2 replicas), Service, settings, migration Job (0009, 0010)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
 ```
@@ -19,9 +21,31 @@ A local PV only mounts a directory that already exists (needs sudo on the node):
 ```
 # on each GPU node: model weights
 sudo mkdir -p /mnt/storage/tollgate/models
-# on vps-node-2 only: Prometheus data, owned by the user Prometheus runs as
+# on vps-node-2 only: Prometheus and Postgres data, owned by the users they run as
 sudo mkdir -p /mnt/storage/tollgate/prometheus && sudo chown 1000:2000 /mnt/storage/tollgate/prometheus
+sudo mkdir -p /mnt/storage/tollgate/postgres && sudo chown 999:999 /mnt/storage/tollgate/postgres
 ```
+The tollgate Secrets (PowerShell). Random 64-character hex values, never printed or written to disk. The
+gateway's database password goes into two Secrets, so it's generated once into `$pg`:
+```powershell
+function New-Secret { $b = [byte[]]::new(32); [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); ($b | ForEach-Object { $_.ToString('x2') }) -join '' }
+$pg = New-Secret
+
+$a = @("--from-literal=POSTGRES_PASSWORD=$(New-Secret)", "--from-literal=TOLLGATE_DB_PASSWORD=$pg",
+       "--from-literal=KEYCLOAK_DB_PASSWORD=$(New-Secret)")
+kubectl -n tollgate create secret generic postgres-credentials @a
+
+$a = @("--from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin", "--from-literal=KC_BOOTSTRAP_ADMIN_PASSWORD=$(New-Secret)")
+kubectl -n tollgate create secret generic keycloak-admin @a
+
+$a = @("--from-literal=SUPPORT_CLIENT_SECRET=$(New-Secret)", "--from-literal=BILLING_CLIENT_SECRET=$(New-Secret)")
+kubectl -n tollgate create secret generic keycloak-clients @a
+
+$a = @("--from-literal=TOLLGATE_API_KEY_PEPPER=$(New-Secret)",
+       "--from-literal=TOLLGATE_DATABASE_URL=postgresql+asyncpg://tollgate:$pg@postgres.tollgate.svc:5432/tollgate")
+kubectl -n tollgate create secret generic gateway-auth @a
+```
+Changing the pepper later invalidates every API key (their hashes no longer match).
 Grafana's admin login, as a Secret that never goes in Git (PowerShell):
 ```powershell
 $pw = -join ((48..57 + 65..90 + 97..122) | ForEach-Object { [char]$_ } | Get-Random -Count 24)
@@ -43,6 +67,13 @@ On a fresh cluster, run `kubectl apply -k deploy` **twice**. The first run creat
 `HelmChart`, and k3s installs kube-prometheus-stack in a background Job. That Job brings the CRDs the
 PodMonitors and ServiceMonitors need, so they only apply on the second run.
 
+Then apply the gateway's database migrations (once per release; see the comments in the file):
+```
+kubectl apply -f deploy/gateway/migrate-job.yaml
+kubectl -n tollgate wait --for=condition=complete job/gateway-migrate --timeout=2m
+kubectl -n tollgate delete job gateway-migrate
+```
+
 ## The gateway
 The OpenAI-compatible entry point (ADR 0009), inside the cluster at
 `http://tollgate-gateway.tollgate.svc:8000/v1`. From the workstation:
@@ -57,7 +88,39 @@ curl.exe -s http://localhost:8000/v1/models
   then remove the override with `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_UPSTREAM_URL-`.
   An explicit env var wins over the ConfigMap.
 - **Shipping a code change:** push the branch, wait for the *Gateway image* workflow, then put the new
-  `sha-<commit>@sha256:<digest>` in `gateway/deployment.yaml` and re-apply.
+  `sha-<commit>@sha256:<digest>` in `gateway/deployment.yaml` and `gateway/migrate-job.yaml`, run the
+  migration Job if the schema changed, and re-apply.
+
+### Tenants and API keys
+Every `/v1` call needs `Authorization: Bearer <API key or Keycloak token>` (ADR 0010). Manage tenants and
+keys with the admin CLI inside a gateway pod:
+```powershell
+$admin = "kubectl -n tollgate exec deploy/tollgate-gateway -- python -m tollgate_gateway.admin"
+Invoke-Expression "$admin tenant list"
+Invoke-Expression "$admin key create support --name 'my laptop'"   # prints the key ONCE; save it
+Invoke-Expression "$admin key list support"
+Invoke-Expression "$admin key revoke <key id>"                     # takes up to 60 s to bite
+Invoke-Expression "$admin tenant disable billing"                  # 403 for its keys and tokens
+```
+Then: `curl.exe -s http://localhost:8000/v1/models -H "Authorization: Bearer <key>"`.
+
+### Keycloak tokens
+Each tenant has a service client in the `tollgate` realm (`support-service`, `billing-service`) that gets
+tokens with the client-credentials grant; their secrets are in the `keycloak-clients` Secret. Tokens
+carry `tenant`, audience `tollgate-gateway` and issuer `http://keycloak.tollgate.svc:8080/realms/tollgate`.
+From inside the cluster:
+```
+curl -s http://keycloak.tollgate.svc:8080/realms/tollgate/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=support-service -d client_secret=<secret>
+```
+**Admin console from the workstation:** Keycloak's hostname is pinned to `keycloak.tollgate.svc` (so token
+issuers always match), and it sends the browser there. Map that name to your own machine once, by adding
+`127.0.0.1 keycloak.tollgate.svc` to `C:\Windows\System32\drivers\etc\hosts` (as admin). Then run
+`kubectl -n tollgate port-forward svc/keycloak 8080:8080` and open http://keycloak.tollgate.svc:8080/admin.
+Log in as `admin`; the password is in the `keycloak-admin` Secret. Ingress replaces this in week 17.
+
+The realm is imported from `keycloak/realm-tollgate.json` on the **first** start only; later edits to that
+file are ignored (change the realm in Keycloak, or export it back into the file).
 
 ## Look at the dashboards
 ```powershell
