@@ -88,9 +88,18 @@ class LoadTracker:
             for name, state in self._state.items()
         ]
 
+    def available(self) -> list[tuple[str, int, int]]:
+        """The backends that are up, as (name, slots, priority): the slots the fair queue may
+        hand out (ADR 0014)."""
+        return [
+            (name, self.backends[name].slots, self.backends[name].priority)
+            for name, state in self._state.items()
+            if state.up
+        ]
+
     def capacity(self) -> int:
-        """Slots on the backends that are up: what the fair queue may hand out (ADR 0014)."""
-        return sum(self.backends[name].slots for name, state in self._state.items() if state.up)
+        """Slots on the backends that are up."""
+        return sum(slots for _, slots, _ in self.available())
 
     def sent(self, name: str) -> None:
         """Count a request sent there, so the next request sees it before the next poll does."""

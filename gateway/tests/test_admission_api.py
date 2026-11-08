@@ -89,6 +89,22 @@ async def test_a_flooding_tenant_does_not_make_others_wait_behind_it(make, upstr
     assert order[-1] != "billing:1"
 
 
+async def test_requests_go_to_the_backend_the_queue_chose(make, upstream) -> None:
+    backends = [
+        {"name": "node-1", "url": "http://node-1:8080", "slots": 1},
+        {"name": "node-2", "url": "http://node-2:8080", "slots": 2},
+    ]
+    gateway = await make(backends=backends)
+    upstream.delay = 0.2
+
+    responses = await asyncio.gather(*(gateway.chat("support", str(i)) for i in range(3)))
+
+    # Most room first: node-2, then a tie (node-1 by name), then node-2's second slot.
+    served = sorted(r.headers["x-tollgate-backend"] for r in responses)
+    assert served == ["node-1", "node-2", "node-2"]
+    assert upstream.peak == 3
+
+
 async def test_with_the_queue_off_requests_go_straight_to_the_backend(make, upstream) -> None:
     gateway = await make(fair_queue=False)
     upstream.delay = 0.2
@@ -260,7 +276,7 @@ async def test_a_slot_held_impossibly_long_stops_being_renewed(clock) -> None:
     async def connected() -> bool:
         return False
 
-    ticket = await admission.wait_for_slot("support", "r1", lambda: 1, connected)
+    ticket = await admission.wait_for_slot("support", "r1", lambda: [("node-1", 1, 1)], connected)
     renewals = asyncio.create_task(admission.run_renewals())
     clock.now += 101
     await asyncio.sleep(0.05)
@@ -269,5 +285,5 @@ async def test_a_slot_held_impossibly_long_stops_being_renewed(clock) -> None:
     assert ("support", "r1") not in admission.held
     clock.now += 1
     assert (await queue.state()).running == {}
-    assert ticket.queued
+    assert ticket.queued and ticket.backend == "node-1"
     await redis.aclose()

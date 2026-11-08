@@ -33,10 +33,15 @@ async def queue(clock):
     await redis.aclose()
 
 
+def one(slots: int) -> list[tuple[str, int, int]]:
+    """A single backend with this many slots: (name, slots, priority)."""
+    return [("node-1", slots, 1)]
+
+
 async def start(queue: FairQueue, tenant: str, request_id: str, capacity: int) -> str:
     """Join, then try once: "start" or "wait"."""
     await queue.join(tenant, request_id)
-    return await queue.try_start(tenant, request_id, capacity)
+    return (await queue.try_start(tenant, request_id, one(capacity))).outcome
 
 
 async def running(queue: FairQueue) -> dict[str, int]:
@@ -65,7 +70,7 @@ async def test_a_finished_request_frees_its_slot(queue) -> None:
 
     await queue.finish("support", "s1")
 
-    assert await queue.try_start("support", "s2", capacity=1) == "start"
+    assert (await queue.try_start("support", "s2", one(1))).outcome == "start"
 
 
 async def test_finishing_twice_is_harmless(queue) -> None:
@@ -82,7 +87,7 @@ async def test_more_capacity_lets_waiting_requests_start(queue) -> None:
     await start(queue, "support", "s1", capacity=1)
     assert await start(queue, "support", "s2", capacity=1) == "wait"
 
-    assert await queue.try_start("support", "s2", capacity=36) == "start"
+    assert (await queue.try_start("support", "s2", one(36))).outcome == "start"
 
 
 # --- fairness ------------------------------------------------------------------------------------
@@ -94,8 +99,8 @@ async def test_within_a_tenant_first_come_first_served(queue) -> None:
     await queue.join("support", "s3")
     await queue.finish("support", "s1")
 
-    assert await queue.try_start("support", "s3", capacity=1) == "wait"  # s2 is ahead
-    assert await queue.try_start("support", "s2", capacity=1) == "start"
+    assert (await queue.try_start("support", "s3", one(1))).outcome == "wait"  # s2 is ahead
+    assert (await queue.try_start("support", "s2", one(1))).outcome == "start"
 
 
 async def test_the_tenant_with_fewest_running_goes_next(queue) -> None:
@@ -107,8 +112,8 @@ async def test_the_tenant_with_fewest_running_goes_next(queue) -> None:
 
     await queue.finish("support", "s0")
 
-    assert await queue.try_start("support", "s-late", capacity=2) == "wait"
-    assert await queue.try_start("billing", "b1", capacity=2) == "start"
+    assert (await queue.try_start("support", "s-late", one(2))).outcome == "wait"
+    assert (await queue.try_start("billing", "b1", one(2))).outcome == "start"
 
 
 async def test_a_tie_goes_to_whoever_waited_longest(queue) -> None:
@@ -120,8 +125,8 @@ async def test_a_tie_goes_to_whoever_waited_longest(queue) -> None:
     await queue.finish("support", "s1")
     await queue.finish("billing", "b1")  # 0 running each now
 
-    assert await queue.try_start("support", "s2", capacity=1) == "wait"
-    assert await queue.try_start("billing", "b2", capacity=1) == "start"
+    assert (await queue.try_start("support", "s2", one(1))).outcome == "wait"
+    assert (await queue.try_start("billing", "b2", one(1))).outcome == "start"
 
 
 async def test_several_free_slots_are_shared_out_in_one_go(queue) -> None:
@@ -132,9 +137,9 @@ async def test_several_free_slots_are_shared_out_in_one_go(queue) -> None:
         await queue.join("support", rid)
     await queue.join("billing", "b1")
 
-    assert await queue.try_start("support", "s1", capacity=3) == "start"
-    assert await queue.try_start("support", "s2", capacity=3) == "wait"
-    assert await queue.try_start("billing", "b1", capacity=3) == "start"
+    assert (await queue.try_start("support", "s1", one(3))).outcome == "start"
+    assert (await queue.try_start("support", "s2", one(3))).outcome == "wait"
+    assert (await queue.try_start("billing", "b1", one(3))).outcome == "start"
 
 
 async def test_one_busy_tenant_may_use_every_slot(queue) -> None:
@@ -183,7 +188,7 @@ async def test_leaving_the_queue_gives_up_the_place(queue) -> None:
     await queue.finish("support", "s1")  # the client hung up while waiting
     await queue.finish("support", "s0")
 
-    assert await queue.try_start("support", "s2", capacity=1) == "start"
+    assert (await queue.try_start("support", "s2", one(1))).outcome == "start"
 
 
 # --- leases --------------------------------------------------------------------------------------
@@ -196,7 +201,9 @@ async def test_an_unrenewed_slot_expires(queue, clock) -> None:
 
     clock.now += 31
 
-    assert await queue.try_start("billing", "b1", capacity=1) == "gone"  # its own lease ran out
+    assert (
+        await queue.try_start("billing", "b1", one(1))
+    ).outcome == "gone"  # its own lease ran out
     assert await running(queue) == {}
 
 
@@ -219,7 +226,7 @@ async def test_a_dead_waiter_does_not_block_the_queue(queue, clock) -> None:
     clock.now += 15  # b-dead is now past its lease
     await queue.finish("support", "s0")
 
-    assert await queue.try_start("support", "s1", capacity=1) == "start"
+    assert (await queue.try_start("support", "s1", one(1))).outcome == "start"
 
 
 async def test_renewing_something_finished_does_not_bring_it_back(queue) -> None:
@@ -229,6 +236,70 @@ async def test_renewing_something_finished_does_not_bring_it_back(queue) -> None
     await queue.renew([("support", "s1")])
 
     assert await running(queue) == {}
+
+
+# --- which backend ------------------------------------------------------------------------------
+
+VLLM_AND_NODES = [("vllm", 32, 0), ("node-1", 2, 1), ("node-2", 2, 1)]
+NODES = [("node-1", 2, 1), ("node-2", 2, 1)]
+
+
+async def test_the_slot_is_on_the_preferred_backend_while_it_has_room(queue) -> None:
+    await queue.join("support", "s1")
+
+    turn = await queue.try_start("support", "s1", VLLM_AND_NODES)
+
+    assert (turn.outcome, turn.backend) == ("start", "vllm")
+
+
+async def test_the_slot_is_on_the_backend_with_most_room(queue) -> None:
+    await queue.join("support", "s1")
+    await queue.try_start("support", "s1", NODES)
+    await queue.join("support", "s2")
+
+    turn = await queue.try_start("support", "s2", NODES)
+
+    assert turn.backend == "node-2"  # node-1 has one running already
+
+
+async def test_a_freed_slot_is_handed_out_on_the_backend_that_freed_it(queue) -> None:
+    # The point of choosing the backend here: polled load numbers lag, and a request sent to a
+    # node that's still full waits in llama-server's own queue for a whole generation.
+    started = {}
+    for rid in ("s1", "s2", "s3", "s4"):
+        await queue.join("support", rid)
+        started[rid] = (await queue.try_start("support", rid, NODES)).backend
+    on_node_1 = next(rid for rid, backend in started.items() if backend == "node-1")
+    await queue.join("billing", "b1")
+
+    await queue.finish("support", on_node_1)
+
+    assert (await queue.try_start("billing", "b1", NODES)).backend == "node-1"
+
+
+async def test_a_backend_that_went_down_gets_no_new_requests(queue) -> None:
+    await queue.join("support", "s1")
+
+    turn = await queue.try_start("support", "s1", [("node-2", 2, 1)])  # node-1 is down
+
+    assert turn.backend == "node-2"
+
+
+async def test_a_running_request_keeps_its_backend(queue) -> None:
+    await queue.join("support", "s1")
+    first = await queue.try_start("support", "s1", NODES)
+
+    again = await queue.try_start("support", "s1", NODES)
+
+    assert (again.outcome, again.backend) == ("start", first.backend)
+
+
+async def test_the_state_shows_slots_per_backend(queue) -> None:
+    for rid in ("s1", "s2", "s3"):
+        await queue.join("support", rid)
+        await queue.try_start("support", rid, NODES)
+
+    assert (await queue.state()).backends == {"node-1": 2, "node-2": 1}
 
 
 # --- the retry hint ------------------------------------------------------------------------------

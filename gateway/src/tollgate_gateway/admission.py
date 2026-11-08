@@ -42,6 +42,7 @@ class Ticket:
     tenant: str
     request_id: str
     started: float
+    backend: str | None = None  # the backend its slot is on; None when not queued
     queued: bool = True  # False: Redis was down and the request went ahead without a slot
     released: bool = field(default=False)
 
@@ -90,11 +91,17 @@ class Admission:
         self,
         tenant: str,
         request_id: str,
-        capacity: Callable[[], int],
+        backends: Callable[[], list[tuple[str, int, int]]],
         disconnected: Callable[[], Awaitable[bool]],
     ) -> Ticket | QueueRefusal | None:
-        """A Ticket once it's this request's turn; a QueueRefusal (send 429); or None if the
-        client hung up while waiting."""
+        """A Ticket once it's this request's turn, naming the backend its slot is on; a
+        QueueRefusal (send 429); or None if the client hung up while waiting.
+
+        backends: the ones that are up right now, as (name, slots, priority)."""
+
+        def capacity() -> int:
+            return sum(slots for _, slots, _ in backends())
+
         key = (tenant, request_id)
         try:
             joined = await self.queue.join(tenant, request_id)
@@ -115,11 +122,11 @@ class Admission:
         deadline = self.clock() + self.max_wait_s
         try:
             while True:
-                outcome = await self.queue.try_start(tenant, request_id, capacity())
-                if outcome == "start":
+                turn = await self.queue.try_start(tenant, request_id, backends())
+                if turn.outcome == "start":
                     admitted = True
-                    return Ticket(self, tenant, request_id, self.clock())
-                if outcome == "gone":  # its lease ran out (Redis was unreachable for a while)
+                    return Ticket(self, tenant, request_id, self.clock(), turn.backend)
+                if turn.outcome == "gone":  # its lease ran out (Redis was unreachable for a while)
                     await self.queue.join(tenant, request_id)
                 if self.clock() >= deadline:
                     state = await self.queue.state()

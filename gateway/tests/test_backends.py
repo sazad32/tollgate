@@ -183,3 +183,4 @@ async def test_capacity_is_the_slots_of_the_backends_that_are_up(tracker, server
     await tracker.poll_once()
 
     assert tracker.capacity() == 2
+    assert tracker.available() == [("node-1", 2, 1)]

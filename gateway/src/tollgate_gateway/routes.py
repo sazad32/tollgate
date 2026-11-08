@@ -138,13 +138,13 @@ async def chat_completions(request: Request) -> Response:
             hosted, principal, payload, chat, request_id, reservation, headers
         )
 
-    # 4. Local: wait for a fair turn at a slot (ADR 0014). Waiting can take a while, so the
-    # backend is then chosen again from fresh load numbers, still right before sending.
+    # 4. Local: wait for a fair turn at a slot (ADR 0014). The queue says which backend the slot
+    # is on; the others stay in the order as failover.
     ticket: Ticket | None = None
     admission: Admission | None = request.app.state.admission
     if admission is not None:
         outcome = await admission.wait_for_slot(
-            tenant.id, request_id, loads.capacity, request.is_disconnected
+            tenant.id, request_id, loads.available, request.is_disconnected
         )
         if not isinstance(outcome, Ticket):
             if reservation:
@@ -155,7 +155,10 @@ async def chat_completions(request: Request) -> Response:
             response.headers.update(headers)
             return response
         ticket = outcome
-        route = Route("local", route.reason, local_order(loads.snapshot()) or route.backends)
+        order = local_order(loads.snapshot()) or route.backends
+        if ticket.backend:
+            order = (ticket.backend, *(name for name in order if name != ticket.backend))
+        route = Route("local", route.reason, order)
     try:
         return await forward_local(request, route, payload, chat, reservation, headers, ticket)
     except BaseException:

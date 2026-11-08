@@ -2,6 +2,9 @@
 
 Three local backends (vLLM, node-1, node-2) on one fake transport, told apart by host name, plus the
 fake Anthropic API. Tenants: support is local_only, engineering is hosted_allowed.
+
+These tests route by polled load, so the fair queue is off here: with it on, the queue picks the
+backend from its own exact count of what runs where (test_admission_api.py, ADR 0014).
 """
 
 import asyncio
@@ -49,6 +52,7 @@ async def make(make_gateway, support_key, engineering_key) -> AsyncIterator[Call
 
     async def build(**settings: object) -> Gateway:
         settings.setdefault("backends", BACKENDS)
+        settings.setdefault("fair_queue", False)
         app = make_gateway(**settings)
         lifespan = app.router.lifespan_context(app)
         await lifespan.__aenter__()
