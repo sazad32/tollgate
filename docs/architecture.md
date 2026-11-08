@@ -23,7 +23,8 @@ Gateway -> in-memory buffer -> Redis Streams `tollgate:usage` (one event per req
            -> Postgres usage ledger (key = idempotency key, so a copy is skipped)
               -> Monthly invoices per tenant (CronJob, 06:00 UTC on the 1st; ADR 0017): the rows
                  recorded in the month, priced from deploy/billing/prices.toml
-        -> Nightly reconciliation: ledger vs model-reported token counts
+        -> Nightly reconciliation (CronJob, 02:00 UTC; ADR 0018): the ledger's output tokens per
+           backend vs the model servers' own counters in Prometheus; fails on a gap
 ```
 
 ## Components
@@ -46,6 +47,8 @@ Gateway -> in-memory buffer -> Redis Streams `tollgate:usage` (one event per req
 - A usage event is counted exactly once (idempotency key = request id + event type).
 - Every billed ledger row is on exactly one invoice, and a finalized invoice never changes: a month
   holds the rows recorded in it, so a closed month can't gain one (ADR 0017).
+- Every night, each local model server's own count of generated tokens is checked against the
+  ledger; only estimated tokens may differ (ADR 0018).
 - A tenant's data policy decides whether a request may leave the network. Default: local only, and any
   value other than `hosted_allowed` counts as local only. The router checks it, and the hosted adapter
   checks it again before anything leaves (ADR 0013).
@@ -64,6 +67,7 @@ Gateway -> in-memory buffer -> Redis Streams `tollgate:usage` (one event per req
 - `invoices(tenant_id + period PK, currency, requests, input_tokens, output_tokens, total, finalized_at)` (week 12)
 - `invoice_lines(tenant_id + period + line_no PK, model, meter, band_from, band_up_to, tokens, per_million, amount)`
 - `invoice_items(idempotency_key PK -> usage_ledger, tenant_id, period)`: which invoice each ledger row is on
+- `reconciliations(day + backend + meter PK, ledger_reported, ledger_estimated, server, allowed, status, since, until, checked_at)` (week 13)
 
 ## Out of scope for the public repo
 Client-specific billing adapters, client SSO wiring, client deployment manifests (Stage 3, private repo).

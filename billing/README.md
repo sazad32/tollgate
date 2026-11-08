@@ -14,6 +14,8 @@ prices the ledger into one invoice per tenant (ADR 0017).
 | `prices.py` | Reads the price list (`deploy/billing/prices.toml`) and charges tokens across its bands |
 | `invoicing.py` | A tenant's month of usage into invoice lines; no database |
 | `invoices.py` | Preview, finalize, show, list and verify invoices in Postgres |
+| `reconcile.py` | The ledger against the model servers' token counters in Prometheus (ADR 0018) |
+| `audit.py` | Each request as its client saw it (`tollgate_bench metering`) against its ledger row |
 | `db.py`, `migrations/` | The ledger, rejects and invoice tables (Alembic) |
 
 ## Tests

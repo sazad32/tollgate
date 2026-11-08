@@ -90,6 +90,11 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   in it; lines rounded half-up to the cent, total = sum of lines. CronJob `tollgate-billing-invoices`
   finalizes last month at 06:00 UTC on the 1st (locks the ledger, idempotent, unpriced model = no invoice
   + exit 1) and verifies. `invoice_items` (PK = ledger row) keeps a row off two invoices.
+- Reconciliation (ADR 0018): CronJob `tollgate-billing-reconcile` (02:00 UTC) compares yesterday's ledger
+  output tokens per backend with the servers' counters in Prometheus (raw samples; llama-server's prompt
+  counter skips cached tokens, so input isn't compared); fails on a gap (KubeJobFailed). No automatic
+  corrections. Traffic straight to a model server (benchmarks, port-forwards) shows up as a gap.
+  `tollgate_bench metering` + `tollgate_billing check-requests` audit requests one by one.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -134,6 +139,8 @@ kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDI
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status   # billing: group, ledger, per tenant
 kubectl apply -f deploy/billing/migrate-job.yaml   # billing's migrations, once per release (then delete the Job)
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing invoice preview support   # also: finalize|show|list|verify
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing reconcile --day 2026-11-09   # or --start/--end; default yesterday
+uv run python -m tollgate_bench metering --url http://localhost:8000 --key support=TG_SUPPORT > bench/raw/m.jsonl   # then check-requests (bench/README.md)
 docker run -d --rm --name tollgate-test-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:54329:5432 postgres:18.6-bookworm  # then TOLLGATE_TEST_DATABASE_URL (billing/README.md)
 ```
 (Add new commands here as they are created.)
