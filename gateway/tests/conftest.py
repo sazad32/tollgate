@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import fakeredis
 import httpx
+import httpx2
 import jwt
 import pytest
 import pytest_asyncio
@@ -75,6 +76,103 @@ class FakeUpstream:
 @pytest.fixture
 def upstream() -> FakeUpstream:
     return FakeUpstream()
+
+
+# --- fake Anthropic API --------------------------------------------------------------------------
+
+CLAUDE = "claude-opus-5-5"
+
+
+class FakeAnthropic:
+    """Anthropic's Messages API: a reply "Hello" for 12 prompt and 7 output tokens, plain or
+    streamed, unless the script says otherwise. Speaks httpx2, the anthropic SDK's HTTP library."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx2.Request] = []
+        self.script: list[httpx2.Response | Exception] = []
+        self.iterations: list[dict] | None = None  # per-attempt usage, as after a refusal fallback
+        self.break_stream = False  # drop the connection after the first text delta
+
+    def usage(self) -> dict:
+        usage: dict = {"input_tokens": 12, "output_tokens": 7}
+        if self.iterations:
+            usage["iterations"] = self.iterations
+        return usage
+
+    def message(self) -> dict:
+        return {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": CLAUDE,
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "sig"},  # omitted by default
+                {"type": "text", "text": "Hello"},
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": self.usage(),
+        }
+
+    def events(self) -> list[dict]:
+        start = {**self.message(), "content": [], "stop_reason": None}
+        start["usage"] = {"input_tokens": 12, "output_tokens": 1}
+        delta_usage: dict = {"output_tokens": 7}
+        if self.iterations:
+            delta_usage["iterations"] = self.iterations
+        thinking = {"type": "thinking", "thinking": "", "signature": ""}
+        return [
+            {"type": "message_start", "message": start},
+            {"type": "content_block_start", "index": 0, "content_block": thinking},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "signature_delta", "signature": "sig"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "Hel"}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "lo"}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+             "usage": delta_usage},
+            {"type": "message_stop"},
+        ]  # fmt: skip
+
+    def sse(self) -> httpx2.Response:
+        frames = [f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in self.events()]
+        if not self.break_stream:
+            return httpx2.Response(
+                200, content=b"".join(frames), headers={"content-type": "text/event-stream"}
+            )
+
+        class Broken(httpx2.AsyncByteStream):
+            async def __aiter__(self):
+                for frame in frames[:6]:  # up to and including the first text delta
+                    yield frame
+                raise httpx2.ReadError("connection reset")
+
+        return httpx2.Response(200, stream=Broken(), headers={"content-type": "text/event-stream"})
+
+    async def handle(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        if self.script:
+            step = self.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+        if json.loads(request.content).get("stream"):
+            return self.sse()
+        return httpx2.Response(200, json=self.message())
+
+    @property
+    def last_body(self) -> dict:
+        return json.loads(self.requests[-1].content)
+
+
+@pytest.fixture
+def claude() -> FakeAnthropic:
+    return FakeAnthropic()
 
 
 # --- fake tenant database ------------------------------------------------------------------------

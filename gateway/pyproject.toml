@@ -5,6 +5,7 @@ description = "OpenAI-compatible gateway: auth, token rate limits, routing, stre
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.1",
+    "anthropic>=2.6.0",
     "asyncpg>=0.32.0",
     "fastapi>=0.162.2",
     "httpx>=0.28.1",
