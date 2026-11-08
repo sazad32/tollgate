@@ -1,0 +1,35 @@
+# What tenants pay, per million tokens, by model (ADR 0017). Read by the invoice commands and the
+# monthly invoice CronJob; kustomization.yaml turns it into a ConfigMap. Checked by
+# billing/tests/test_prices.py, which also fails if a model the gateway can answer with has no price.
+#
+# Rules:
+# - Rates are strings ("0.40"), never bare numbers: TOML numbers are binary floats.
+# - A price version takes effect on the 1st of its month (UTC). To change a price, ADD a new
+#   [[prices]] entry with a later `from`; never edit one already used for a finalized invoice
+#   (`invoice verify` would then report those invoices as no longer matching).
+# - Bands are graduated, like tax brackets: each band's share of the month's tokens at its own rate.
+#   Every band but the last has `up_to` (the month's token count where it ends).
+#
+# These are synthetic chargeback rates for the portfolio scenario (Stage 1), not real prices.
+
+currency = "USD"
+
+# The local model (llama-server on the nodes, vLLM on the workstation: the same alias). Cheap, and
+# cheaper per output token past 10 million a month, to reward keeping traffic local.
+[[prices]]
+model = "smollm3-3b"
+from = "2026-11"
+input = [{ per_million = "0.10" }]
+output = [
+  { up_to = 10_000_000, per_million = "0.40" },
+  { per_million = "0.30" },
+]
+
+# Claude via the Anthropic API, for hosted_allowed tenants: Anthropic's list price for
+# claude-opus-5-5 ($4.00 in, $20.00 out per million, Oct 2026) plus 10%. No volume discount: the
+# cost to us doesn't fall with volume.
+[[prices]]
+model = "claude-opus-5-5"
+from = "2026-11"
+input = [{ per_million = "4.40" }]
+output = [{ per_million = "22.00" }]
