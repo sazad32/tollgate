@@ -76,6 +76,7 @@ async def fairness(args: argparse.Namespace) -> None:
         args.url, args.model, flood_key, trickle_key, run_id=args.run_id, flood=args.flood,
         trickle=args.trickle, trickle_start_s=args.trickle_start,
         trickle_every_s=args.trickle_every, max_tokens=args.max_tokens,
+        trickle_url=args.trickle_url,
     )  # fmt: skip
     for role, result in results:
         emit({"type": "fairness_request", "label": args.label, "tenant": role, **asdict(result)})
@@ -114,6 +115,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p_fair = commands.add_parser("fairness", help="two-tenant fairness demo against the gateway")
     p_fair.add_argument("--url", required=True, help="gateway base URL, without /v1")
+    p_fair.add_argument("--trickle-url", help="another replica for the trickle (default: --url)")
     p_fair.add_argument("--model", default="smollm3-3b")
     p_fair.add_argument("--label", required=True, help="name of this run in the table")
     p_fair.add_argument("--flood-key-env", required=True, help="env var with the burst's API key")

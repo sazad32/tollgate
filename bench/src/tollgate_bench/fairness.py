@@ -31,10 +31,17 @@ async def run_fairness(
     trickle_start_s: float = 2.0,
     trickle_every_s: float = 5.0,
     max_tokens: int = MAX_TOKENS,
+    trickle_url: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[tuple[str, RequestResult]]:
-    """Run the burst and the trickle; return (role, result) for every request."""
-    url = base_url.rstrip("/") + "/v1/chat/completions"
+    """Run the burst and the trickle; return (role, result) for every request.
+
+    trickle_url: send the trickle through another gateway replica than the burst, to show the
+    two replicas share one queue."""
+    urls = {
+        "flood": base_url.rstrip("/") + "/v1/chat/completions",
+        "trickle": (trickle_url or base_url).rstrip("/") + "/v1/chat/completions",
+    }
     limits = httpx.Limits(max_connections=flood + trickle)
 
     async with httpx.AsyncClient(
@@ -44,7 +51,9 @@ async def run_fairness(
         async def send(role: str, key: str, index: int) -> tuple[str, RequestResult]:
             headers = {"Authorization": f"Bearer {key}"}
             request_id = f"{run_id}-{role}-{index:02d}"
-            result = await one_request(client, url, headers, model, request_id, flood, max_tokens)
+            result = await one_request(
+                client, urls[role], headers, model, request_id, flood, max_tokens
+            )
             return role, result
 
         tasks = [asyncio.create_task(send("flood", flood_key, i)) for i in range(flood)]

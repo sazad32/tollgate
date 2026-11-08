@@ -20,21 +20,25 @@ def sse_body() -> bytes:
 @pytest.mark.asyncio
 async def test_both_tenants_send_their_requests_with_their_own_keys() -> None:
     seen: list[str] = []
+    hosts: list[str] = []
 
     async def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request.headers["authorization"])
+        hosts.append(request.url.host)
         await asyncio.sleep(0.01)
         return httpx.Response(200, content=sse_body())
 
     results = await run_fairness(
         "http://gateway", "m", "flood-key", "trickle-key", run_id="t", flood=4, trickle=2,
-        trickle_start_s=0.01, trickle_every_s=0.01, transport=httpx.MockTransport(handle),
+        trickle_start_s=0.01, trickle_every_s=0.01, trickle_url="http://replica-b",
+        transport=httpx.MockTransport(handle),
     )  # fmt: skip
 
     assert sorted(role for role, _ in results) == ["flood"] * 4 + ["trickle"] * 2
     assert seen.count("Bearer flood-key") == 4
     assert seen.count("Bearer trickle-key") == 2
     assert all(r.error is None for _, r in results)
+    assert hosts.count("gateway") == 4 and hosts.count("replica-b") == 2
 
 
 def result(started: float, ttft: float | None, latency: float, error: str | None = None):
