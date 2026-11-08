@@ -2,6 +2,17 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 9: fair queuing (Phase 2 gate met)
+- Changed: local requests wait in the gateway, in Redis, for a slot on a specific backend; each free
+  slot goes to the tenant with the fewest requests running; 429 + Retry-After past 16 waiting or
+  120 s; leases free a dead replica's slots (ADR 0014). New `tollgate_bench fairness` demo. 43 new
+  tests. Phase 2 gate met.
+- Broke: the first demo routed admitted requests by /metrics up to a second old, so some waited a
+  whole generation on a node that was still full; the queue now hands out slots per backend.
+- Measured: behind a 12-request burst, the other tenant's median wait for a first token fell from
+  32.4 s to 13.8 s (worst 40.6 → 18.0 s), with the same total throughput; at 1,200 tokens/min one
+  tenant got 429s while the other got 200.
+
 ## 2026-11-07 — Week 8: router and data policy
 - Changed: the gateway routes by each backend's load, read from its /metrics every second: vLLM first,
   then the node with most room, with failover. Claude, through the anthropic SDK, only for
