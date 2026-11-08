@@ -1,14 +1,15 @@
-"""The HTTP client for the model server, and the one retry we allow.
+"""The HTTP client for the local model servers, and the one retry we allow.
 
 .NET: one HttpClient for the whole app, created at startup, like AddSingleton<HttpClient>.
 Gotcha: there's no IHttpClientFactory; the app creates and closes this single instance itself
-(main.py, lifespan).
+(main.py, lifespan). It has no base URL: each request names its backend's full URL.
 """
 
 import logging
 
 import httpx
 
+from tollgate_gateway.backends import LoadTracker
 from tollgate_gateway.config import Settings
 
 log = logging.getLogger("tollgate.gateway.upstream")
@@ -27,7 +28,6 @@ def make_client(
     if settings.upstream_api_key is not None:
         headers["Authorization"] = f"Bearer {settings.upstream_api_key.get_secret_value()}"
     return httpx.AsyncClient(
-        base_url=settings.upstream_url,
         headers=headers,
         timeout=httpx.Timeout(
             connect=settings.upstream_connect_timeout_s,
@@ -43,26 +43,37 @@ def make_client(
     )
 
 
-async def open_upstream(
+async def open_local(
     client: httpx.AsyncClient,
-    method: str,
+    loads: LoadTracker,
+    order: tuple[str, ...],
     path: str,
     *,
     request_id: str,
-    json_body: object | None = None,
-) -> httpx.Response:
-    """Send a request and return as soon as the response headers arrive (the body streams later).
+    json_body: object,
+) -> tuple[str, httpx.Response]:
+    """POST to the first backend in `order` and return (its name, the response) as soon as the
+    response headers arrive (the body streams later). The caller must close the response.
 
-    Retries exactly once, and only for RETRY_SAFE failures. The caller must close the response.
+    Two attempts in all, and a second one only after a RETRY_SAFE failure: it goes to the next
+    backend in `order`, or to the same one again if it is the only one.
     """
-    headers = {"X-Request-ID": request_id}
-    for attempt in (1, 2):
-        request = client.build_request(method, path, json=json_body, headers=headers)
+    attempts = order[:2] if len(order) > 1 else order * 2
+    for number, name in enumerate(attempts, start=1):
+        url = loads.backend(name).url + path
+        request = client.build_request(
+            "POST", url, json=json_body, headers={"X-Request-ID": request_id}
+        )
         try:
-            return await client.send(request, stream=True)
+            response = await client.send(request, stream=True)
         except RETRY_SAFE as exc:
-            if attempt == 2:
+            if isinstance(exc, httpx.ConnectError) and name not in attempts[number:]:
+                loads.mark_down(name)  # refused, and not tried again: keep other requests away
+            if number == len(attempts):
                 raise
-            log.warning("request %s: upstream failed before responding (%r), retrying once",
-                        request_id, exc)  # fmt: skip
+            log.warning("request %s: %s failed before responding (%r), trying %s",
+                        request_id, name, exc, attempts[number])  # fmt: skip
+            continue
+        loads.sent(name)
+        return name, response
     raise AssertionError("unreachable")

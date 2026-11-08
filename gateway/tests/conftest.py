@@ -1,5 +1,5 @@
-"""Shared test setup: the gateway in front of a fake model server, a fake tenant database and a fake
-Keycloak. No network, no real model, no real database.
+"""Shared test setup: the gateway in front of fake model servers, a fake Anthropic API, a fake
+tenant database and a fake Keycloak. No network, no real model, no real database.
 
 .NET: like WebApplicationFactory<Program> with the HttpClient handler and stores swapped for fakes.
 """
@@ -44,11 +44,21 @@ JWKS_URL = f"{ISSUER}/protocol/openid-connect/certs"
 
 
 class FakeUpstream:
-    """A model server that answers from a script: each entry is a Response or an exception."""
+    """The model servers (one per host name), answering from a script: each entry is a Response or
+    an exception. /metrics polls are answered from `busy` and kept out of `requests`."""
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.script: list[httpx.Response | Exception] = []
+        self.busy: dict[str, int] = {}  # host -> requests running there; missing = idle
+        self.down: set[str] = set()  # hosts that refuse connections
+
+    def metrics(self, host: str) -> httpx.Response:
+        if host in self.down:
+            raise httpx.ConnectError("connection refused")
+        busy = self.busy.get(host, 0)
+        text = f"llamacpp:requests_processing {busy}\nvllm:num_requests_running {busy}\n"
+        return httpx.Response(200, text=text)
 
     def default(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -60,7 +70,11 @@ class FakeUpstream:
         return httpx.Response(200, json=COMPLETION)
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return self.metrics(request.url.host)
         self.requests.append(request)
+        if request.url.host in self.down:
+            raise httpx.ConnectError("connection refused")
         if self.script:
             step = self.script.pop(0)
             if isinstance(step, Exception):
@@ -184,12 +198,21 @@ def support_key() -> str:
 
 
 @pytest.fixture
-def auth_store(support_key: str) -> InMemoryAuthStore:
-    """Two tenants (one disabled), three keys: support's, a revoked one, the disabled tenant's."""
+def engineering_key() -> str:
+    return generate_key()
+
+
+@pytest.fixture
+def auth_store(support_key: str, engineering_key: str) -> InMemoryAuthStore:
+    """Four tenants: support and billing (local_only, the default), engineering (hosted_allowed) and
+    a disabled one. Keys: support's, engineering's, a revoked one, the disabled tenant's."""
     store = InMemoryAuthStore()
     store.tenants = {
         "support": Tenant(id="support", name="Support team"),
         "billing": Tenant(id="billing", name="Billing team"),
+        "engineering": Tenant(
+            id="engineering", name="Engineering team", data_policy="hosted_allowed"
+        ),
         "legacy": Tenant(id="legacy", name="Retired team", disabled=True),
     }
 
@@ -203,6 +226,7 @@ def auth_store(support_key: str) -> InMemoryAuthStore:
         )
 
     add(support_key, "support", "key-support")
+    add(engineering_key, "engineering", "key-engineering")
     add("tg_revokedrevokedrevokedrevokedrevokedrevok", "support", "key-revoked", revoked=True)
     add("tg_legacylegacylegacylegacylegacylegacylega", "legacy", "key-legacy")
     return store
@@ -303,16 +327,22 @@ def clock() -> Clock:
     return Clock()
 
 
+ONE_BACKEND = [{"name": "node-1", "url": "http://upstream", "kind": "llama", "slots": 2}]
+
+
 @pytest.fixture
 def make_gateway(
     upstream: FakeUpstream,
+    claude: FakeAnthropic,
     auth_store: InMemoryAuthStore,
     keycloak: FakeKeycloak,
     redis: fakeredis.FakeAsyncRedis,
     clock: Clock,
 ):
     def build(**settings: object):
-        settings.setdefault("upstream_url", "http://upstream")
+        settings.setdefault("backends", ONE_BACKEND)
+        settings.setdefault("load_poll_interval_s", 0)  # tests poll by hand: app.state.loads
+        settings.setdefault("anthropic_api_key", "test-anthropic-key")
         settings.setdefault("api_key_pepper", PEPPER.decode())
         settings.setdefault("oidc_issuer", ISSUER)
         settings.setdefault("oidc_audience", AUDIENCE)
@@ -320,6 +350,7 @@ def make_gateway(
         return create_app(
             Settings(**settings),
             upstream_transport=httpx.MockTransport(upstream.handle),
+            hosted_transport=httpx2.MockTransport(claude.handle),
             auth_store=auth_store,
             jwks_transport=httpx.MockTransport(keycloak.handle),
             redis_client=redis,

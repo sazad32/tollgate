@@ -8,6 +8,7 @@ import asyncio
 import json
 
 import httpx
+import httpx2
 import pytest
 from tollgate_gateway.config import Settings
 from tollgate_gateway.main import create_app
@@ -37,20 +38,9 @@ class HangingStream(httpx.AsyncByteStream):
         self.closed.set()
 
 
-async def test_client_disconnect_closes_the_upstream_stream(auth_store, support_key) -> None:
-    stream = HangingStream()
-
-    async def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
-
-    app = create_app(
-        Settings(upstream_url="http://upstream", api_key_pepper="test-pepper"),
-        upstream_transport=httpx.MockTransport(handle),
-        auth_store=auth_store,
-    )
-    body = json.dumps(
-        {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True}
-    ).encode()
+async def disconnect_after_first_chunk(app, body: dict, key: str) -> list[bytes]:
+    """Drive the app like Uvicorn would, and hang up as soon as the first body chunk is out.
+    Returns the chunks the client received."""
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},  # what Uvicorn 0.54 reports
@@ -64,13 +54,13 @@ async def test_client_disconnect_closes_the_upstream_stream(auth_store, support_
         "headers": [
             (b"content-type", b"application/json"),
             (b"host", b"gateway"),
-            (b"authorization", f"Bearer {support_key}".encode()),
+            (b"authorization", f"Bearer {key}".encode()),
         ],
         "client": ("127.0.0.1", 50000),
         "server": ("gateway", 80),
     }
     first_chunk_sent = asyncio.Event()
-    pending = [{"type": "http.request", "body": body, "more_body": False}]
+    pending = [{"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}]
     sent: list[bytes] = []
 
     async def receive() -> dict:
@@ -86,6 +76,84 @@ async def test_client_disconnect_closes_the_upstream_stream(auth_store, support_
 
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    return sent
+
+
+async def test_client_disconnect_closes_the_upstream_stream(auth_store, support_key) -> None:
+    stream = HangingStream()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    app = create_app(
+        Settings(
+            backends=[{"name": "node-1", "url": "http://upstream"}],
+            load_poll_interval_s=0,
+            api_key_pepper="test-pepper",
+        ),
+        upstream_transport=httpx.MockTransport(handle),
+        auth_store=auth_store,
+    )
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+
+    sent = await disconnect_after_first_chunk(app, body, support_key)
 
     assert sent == [FIRST_CHUNK]
+    assert stream.closed.is_set()
+
+
+class HangingClaude(httpx2.AsyncByteStream):
+    """Anthropic's stream: the message starts, one word arrives, then Claude keeps "thinking".
+
+    Unlike HangingStream, `aclose` doesn't await first. When the client leaves, the SDK closes the
+    response itself, in an unshielded `finally`; the real transport underneath (httpcore2) shields
+    the socket close, so it completes even while cancelled. A fake that awaited first would fail
+    where the real stack doesn't.
+    """
+
+    def __init__(self) -> None:
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self):
+        start = {
+            "type": "message_start",
+            "message": {
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+                "content": [], "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 12, "output_tokens": 1},
+            },
+        }  # fmt: skip
+        word = {"type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "Hi"}}  # fmt: skip
+        for event in (start, word):
+            yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        self.closed.set()
+
+
+async def test_client_disconnect_closes_the_hosted_stream(auth_store, engineering_key) -> None:
+    # Hosted tokens cost money: a client that leaves must stop Claude, not just stop listening.
+    stream = HangingClaude()
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    app = create_app(
+        Settings(
+            backends=[{"name": "node-1", "url": "http://upstream"}],
+            load_poll_interval_s=0,
+            api_key_pepper="test-pepper",
+            anthropic_api_key="test-key",
+        ),
+        hosted_transport=httpx2.MockTransport(handle),
+        auth_store=auth_store,
+    )
+    body = {"model": "claude-opus-5-5", "messages": [{"role": "user", "content": "hi"}],
+            "stream": True}  # fmt: skip
+
+    sent = await disconnect_after_first_chunk(app, body, engineering_key)
+
+    assert sent[0].startswith(b"data: ")  # the client got the start of the reply, then left
     assert stream.closed.is_set()

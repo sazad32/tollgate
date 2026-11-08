@@ -6,6 +6,8 @@ Gotcha: nothing is created at import time. The upstream client is made in `lifes
 IHostedService.StartAsync/StopAsync: code before `yield` runs at startup, after it at shutdown.
 """
 
+import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -13,15 +15,18 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import httpx
+import httpx2
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tollgate_gateway.auth import Authenticator, AuthError
+from tollgate_gateway.backends import LoadTracker
 from tollgate_gateway.config import Settings
 from tollgate_gateway.db import PostgresAuthStore, make_engine
 from tollgate_gateway.errors import openai_error
+from tollgate_gateway.hosted import make_hosted
 from tollgate_gateway.jwt_auth import JwksCache, JwtValidator
 from tollgate_gateway.limits import TokenBuckets
 from tollgate_gateway.routes import router
@@ -59,7 +64,27 @@ class RequestIdMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
+    log = logging.getLogger("tollgate.gateway")
     app.state.upstream = make_client(settings, app.state.upstream_transport)
+
+    # Routing (ADR 0013): the local backends' load, read in the background; the hosted model.
+    app.state.loads = LoadTracker(settings.backends, app.state.upstream)
+    poller = None
+    if settings.load_poll_interval_s > 0:
+        poller = asyncio.create_task(app.state.loads.run(settings.load_poll_interval_s))
+    key = settings.anthropic_api_key
+    app.state.hosted = make_hosted(
+        api_key=key.get_secret_value() if key else None,
+        model=settings.hosted_model,
+        effort=settings.hosted_effort,
+        default_max_tokens=settings.hosted_max_tokens,
+        refusal_fallback=settings.hosted_refusal_fallback,
+        timeout_s=settings.hosted_timeout_s,
+        max_retries=settings.hosted_max_retries,
+        transport=app.state.hosted_transport,
+    )
+    if app.state.hosted is None:
+        log.info("TOLLGATE_ANTHROPIC_API_KEY not set: no hosted model, every request stays local")
     jwks_client = httpx.AsyncClient(transport=app.state.jwks_transport, timeout=5.0)
     engine = None
     store = app.state.auth_store
@@ -94,11 +119,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         own_redis = True
     if redis is None:
-        logging.getLogger("tollgate.gateway").warning("TOLLGATE_REDIS_URL not set: no rate limits")
+        log.warning("TOLLGATE_REDIS_URL not set: no rate limits")
     app.state.buckets = TokenBuckets(redis, clock=app.state.clock) if redis is not None else None
     try:
         yield
     finally:
+        if poller is not None:
+            poller.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller
+        if app.state.hosted is not None:
+            await app.state.hosted.client.close()
         await app.state.upstream.aclose()
         await jwks_client.aclose()
         if engine is not None:
@@ -120,16 +151,18 @@ def create_app(
     settings: Settings | None = None,
     upstream_transport: httpx.AsyncBaseTransport | None = None,
     auth_store: AuthStore | None = None,
+    hosted_transport: httpx2.AsyncBaseTransport | None = None,
     jwks_transport: httpx.AsyncBaseTransport | None = None,
     redis_client: Redis | None = None,
     clock: Callable[[], float] = time.time,
 ) -> FastAPI:
-    """Build the app. Tests pass settings and fakes for the model server, the tenant store,
-    Keycloak, Redis and the clock; Uvicorn passes none of them."""
+    """Build the app. Tests pass settings and fakes for the model servers, the tenant store,
+    Anthropic, Keycloak, Redis and the clock; Uvicorn passes none of them."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     app = FastAPI(title="Tollgate gateway", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings or Settings()  # type: ignore[call-arg]  (env supplies the rest)
     app.state.upstream_transport = upstream_transport
+    app.state.hosted_transport = hosted_transport
     app.state.auth_store = auth_store
     app.state.jwks_transport = jwks_transport
     app.state.redis_client = redis_client
