@@ -1,4 +1,7 @@
-"""Command line: `python -m tollgate_bench run|job|report|fairness ...` (see bench/README.md)."""
+"""Command line: `python -m tollgate_bench run|job|report|fairness|metering ...`.
+
+See bench/README.md.
+"""
 
 import argparse
 import asyncio
@@ -14,6 +17,8 @@ from tollgate_bench.client import run_level
 from tollgate_bench.fairness import fairness_table, run_fairness, summarize_fairness
 from tollgate_bench.gpu import gpu_window
 from tollgate_bench.job import manifest
+from tollgate_bench.metering import run_metering
+from tollgate_bench.metering import summary as metering_summary
 from tollgate_bench.report import markdown_table, read_records
 from tollgate_bench.stats import summarize
 from tollgate_bench.targets import TARGETS
@@ -86,6 +91,26 @@ async def fairness(args: argparse.Namespace) -> None:
     log("summary:\n" + fairness_table(summaries))
 
 
+async def metering(args: argparse.Namespace) -> None:
+    keys = {}
+    for pair in args.key:
+        tenant, _, env = pair.partition("=")
+        if not env or env not in os.environ:
+            raise SystemExit(f"--key {pair}: give TENANT=ENV_VAR, with the key in that variable")
+        keys[tenant] = os.environ[env]
+    log(f"metering: {args.requests} requests per tenant ({', '.join(keys)}), "
+        f"{args.concurrency} at a time each")  # fmt: skip
+    started = time.time()
+    records = await run_metering(args.url, args.model, keys, requests=args.requests,
+                                 concurrency=args.concurrency, max_tokens=args.max_tokens,
+                                 hang_up_after=args.hang_up_after, run_id=args.run_id)  # fmt: skip
+    for record in records:
+        emit(asdict(record))
+    log(f"done in {time.time() - started:.0f} s (started {started:.0f}, ended {time.time():.0f})")
+    for line in metering_summary(records):
+        log(line)
+
+
 def main(argv: list[str] | None = None) -> None:
     # Windows writes redirected output in its legacy code page, which garbles "°C" in RESULTS.md.
     sys.stdout.reconfigure(encoding="utf-8")
@@ -127,8 +152,26 @@ def main(argv: list[str] | None = None) -> None:
     p_fair.add_argument("--max-tokens", type=int, default=128)
     p_fair.add_argument("--run-id", default=time.strftime("%Y%m%d-%H%M%S"))
 
+    p_meter = commands.add_parser("metering", help="request mix through the gateway, one JSON line "
+                                  "per request, for billing's check-requests")  # fmt: skip
+    p_meter.add_argument("--url", required=True, help="gateway base URL, without /v1")
+    p_meter.add_argument("--model", default="smollm3-3b")
+    p_meter.add_argument(
+        "--key",
+        action="append",
+        required=True,
+        help="TENANT=ENV_VAR holding that tenant's API key; repeat per tenant",
+    )
+    p_meter.add_argument("--requests", type=int, default=100, help="per tenant")
+    p_meter.add_argument("--concurrency", type=int, default=2, help="per tenant")
+    p_meter.add_argument("--max-tokens", type=int, default=32)
+    p_meter.add_argument("--hang-up-after", type=int, default=5, help="content chunks")
+    p_meter.add_argument("--run-id", default=time.strftime("%Y%m%d-%H%M%S"))
+
     args = parser.parse_args(argv)
-    if args.command == "run":
+    if args.command == "metering":
+        asyncio.run(metering(args))
+    elif args.command == "run":
         asyncio.run(run(args))
     elif args.command == "fairness":
         asyncio.run(fairness(args))
