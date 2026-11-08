@@ -65,6 +65,8 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   and `billing` exist. Postgres 18 (`postgres-0`, node-2) holds tenants and keys (ADR 0011); Keycloak 26
   issues tokens (realm `tollgate`). Secrets `postgres-credentials`, `keycloak-admin`, `keycloak-clients`,
   `gateway-auth` are hand-made (see deploy/README.md); creating Secrets is the user's step, not Claude's.
+- Rate limits (ADR 0012): token bucket per tenant in Redis (`deploy/redis`, Secret `redis-auth`), reserve an
+  estimate, settle with real usage; tiers in `TOLLGATE_RATE_LIMITS`. Redis down = no limits (fail open).
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.

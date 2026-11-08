@@ -11,6 +11,7 @@ deploy/
   llama-server/          StatefulSet (one replica per GPU node), Services, settings (ADR 0004, 0005)
   postgres/              Postgres 18: databases for the gateway and Keycloak (ADR 0011)
   keycloak/              Keycloak 26 and the tollgate realm export (ADR 0003, 0010)
+  redis/                 Redis 8 for the gateway's token buckets (ADR 0012)
   gateway/               the API gateway: Deployment (2 replicas), Service, settings, migration Job (0009, 0010)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
@@ -44,6 +45,10 @@ kubectl -n tollgate create secret generic keycloak-clients @a
 $a = @("--from-literal=TOLLGATE_API_KEY_PEPPER=$(New-Secret)",
        "--from-literal=TOLLGATE_DATABASE_URL=postgresql+asyncpg://tollgate:$pg@postgres.tollgate.svc:5432/tollgate")
 kubectl -n tollgate create secret generic gateway-auth @a
+
+$rp = New-Secret
+$a = @("--from-literal=REDIS_PASSWORD=$rp", "--from-literal=TOLLGATE_REDIS_URL=redis://:$rp@redis.tollgate.svc:6379/0")
+kubectl -n tollgate create secret generic redis-auth @a
 ```
 Changing the pepper later invalidates every API key (their hashes no longer match).
 Grafana's admin login, as a Secret that never goes in Git (PowerShell):
@@ -121,6 +126,19 @@ Log in as `admin`; the password is in the `keycloak-admin` Secret. Ingress repla
 
 The realm is imported from `keycloak/realm-tollgate.json` on the **first** start only; later edits to that
 file are ignored (change the realm in Keycloak, or export it back into the file).
+
+### Rate limits
+Each tenant has a token bucket in Redis (ADR 0012): `TOLLGATE_RATE_LIMITS` in `gateway/gateway.env` sets
+tokens per minute (prompt + output) by tier; the standard tier is 10,000. Every response carries
+`x-ratelimit-limit-tokens`, `x-ratelimit-remaining-tokens` and `x-ratelimit-reset-tokens`; a refused
+request gets 429 with `Retry-After`. If Redis is down, requests go through unlimited (logged).
+```powershell
+# a tenant's bucket right now (tokens may be negative: debt from an underestimated request)
+kubectl -n tollgate exec deploy/redis -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" HGETALL tollgate:bucket:support'
+# try a different limit without editing Git, then remove the override
+kubectl -n tollgate set env deploy/tollgate-gateway 'TOLLGATE_RATE_LIMITS={"standard": 400}'
+kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_RATE_LIMITS-
+```
 
 ## Look at the dashboards
 ```powershell
