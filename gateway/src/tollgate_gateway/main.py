@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from tollgate_gateway.admission import Admission
 from tollgate_gateway.auth import Authenticator, AuthError
 from tollgate_gateway.backends import LoadTracker
 from tollgate_gateway.config import Settings
@@ -29,6 +30,7 @@ from tollgate_gateway.errors import openai_error
 from tollgate_gateway.hosted import make_hosted
 from tollgate_gateway.jwt_auth import JwksCache, JwtValidator
 from tollgate_gateway.limits import TokenBuckets
+from tollgate_gateway.queue import FairQueue
 from tollgate_gateway.routes import router
 from tollgate_gateway.tenants import AuthStore
 from tollgate_gateway.upstream import make_client
@@ -121,13 +123,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if redis is None:
         log.warning("TOLLGATE_REDIS_URL not set: no rate limits")
     app.state.buckets = TokenBuckets(redis, clock=app.state.clock) if redis is not None else None
+
+    # Fair queuing for the local slots (ADR 0014), in the same Redis.
+    app.state.admission = None
+    renewals = None
+    if settings.fair_queue and redis is not None:
+        queue = FairQueue(
+            redis,
+            clock=app.state.clock,
+            lease_s=settings.queue_lease_s,
+            max_waiting=settings.queue_max_waiting,
+        )
+        app.state.admission = Admission(
+            queue, app.state.clock, max_wait_s=settings.queue_max_wait_s,
+            poll_s=settings.queue_poll_s,
+        )  # fmt: skip
+        renewals = asyncio.create_task(app.state.admission.run_renewals())
     try:
         yield
     finally:
-        if poller is not None:
-            poller.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await poller
+        for task in (poller, renewals):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         if app.state.hosted is not None:
             await app.state.hosted.client.close()
         await app.state.upstream.aclose()

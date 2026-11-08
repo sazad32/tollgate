@@ -158,3 +158,11 @@ def test_when_everything_is_full_the_preferred_backend_still_comes_first() -> No
 
     assert (chosen.kind, chosen.reason) == ("local", "queued")
     assert chosen.backends == ("vllm", "node-1")
+
+
+def test_local_order_is_the_up_backends_best_first() -> None:
+    from tollgate_gateway.router import local_order
+
+    loads = [load("node-1", busy=1), vllm(busy=32), load("node-2"), load("node-3", up=False)]
+
+    assert local_order(loads) == ("node-2", "node-1", "vllm")

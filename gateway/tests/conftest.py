@@ -54,6 +54,8 @@ class FakeUpstream:
         self.busy: dict[str, int] = {}  # host -> requests running there; missing = idle
         self.down: set[str] = set()  # hosts that refuse connections
         self.delay = 0.0  # seconds before answering a chat request, like a model reading the prompt
+        self.in_flight = 0  # chat requests being answered right now
+        self.peak = 0  # the most at once
 
     def metrics(self, host: str) -> httpx.Response:
         if host in self.down:
@@ -77,8 +79,13 @@ class FakeUpstream:
         self.requests.append(request)
         if request.url.host in self.down:
             raise httpx.ConnectError("connection refused")
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+        finally:
+            self.in_flight -= 1
         if self.script:
             step = self.script.pop(0)
             if isinstance(step, Exception):
@@ -207,9 +214,15 @@ def engineering_key() -> str:
 
 
 @pytest.fixture
-def auth_store(support_key: str, engineering_key: str) -> InMemoryAuthStore:
+def billing_key() -> str:
+    return generate_key()
+
+
+@pytest.fixture
+def auth_store(support_key: str, engineering_key: str, billing_key: str) -> InMemoryAuthStore:
     """Four tenants: support and billing (local_only, the default), engineering (hosted_allowed) and
-    a disabled one. Keys: support's, engineering's, a revoked one, the disabled tenant's."""
+    a disabled one. Keys: support's, billing's, engineering's, a revoked one, the disabled
+    tenant's."""
     store = InMemoryAuthStore()
     store.tenants = {
         "support": Tenant(id="support", name="Support team"),
@@ -231,6 +244,7 @@ def auth_store(support_key: str, engineering_key: str) -> InMemoryAuthStore:
 
     add(support_key, "support", "key-support")
     add(engineering_key, "engineering", "key-engineering")
+    add(billing_key, "billing", "key-billing")
     add("tg_revokedrevokedrevokedrevokedrevokedrevok", "support", "key-revoked", revoked=True)
     add("tg_legacylegacylegacylegacylegacylegacylega", "legacy", "key-legacy")
     return store
@@ -346,6 +360,7 @@ def make_gateway(
     def build(**settings: object):
         settings.setdefault("backends", ONE_BACKEND)
         settings.setdefault("load_poll_interval_s", 0)  # tests poll by hand: app.state.loads
+        settings.setdefault("queue_poll_s", 0.01)
         settings.setdefault("anthropic_api_key", "test-anthropic-key")
         settings.setdefault("api_key_pepper", PEPPER.decode())
         settings.setdefault("oidc_issuer", ISSUER)

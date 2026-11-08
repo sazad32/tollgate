@@ -55,6 +55,11 @@ def _preference(load: BackendLoad) -> tuple:
     return (load.free <= 0, load.priority, -load.free, load.name)
 
 
+def local_order(loads: list[BackendLoad]) -> tuple[str, ...]:
+    """The backends that are up, best first: the order to try them in."""
+    return tuple(load.name for load in sorted((x for x in loads if x.up), key=_preference))
+
+
 def choose_route(
     loads: list[BackendLoad],
     *,
@@ -84,13 +89,13 @@ def choose_route(
         return Route("hosted", "requested")
 
     can_overflow = allows_hosted and hosted_configured and hosted_unsupported is None
-    up = sorted((load for load in loads if load.up), key=_preference)
-    if not up:
+    order = local_order(loads)
+    if not order:
         if can_overflow:
             return Route("hosted", "no_local_backend")
         return refuse(503, "no_backend_available", "No local model server is available.")
-    order = tuple(load.name for load in up)
-    if up[0].free > 0:
+    first = next(load for load in loads if load.name == order[0])
+    if first.free > 0:
         return Route("local", "free_slot", order)
     if can_overflow:
         return Route("hosted", "overflow")
