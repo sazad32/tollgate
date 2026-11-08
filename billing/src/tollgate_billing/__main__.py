@@ -12,6 +12,12 @@ python -m tollgate_billing invoice   monthly invoices (ADR 0017); needs the pric
   invoice verify [--month YYYY-MM]             every ledger row on exactly one invoice, and each
                                                invoice matches the ledger and the prices
                                                (default: last month)
+python -m tollgate_billing reconcile [--day YYYY-MM-DD | --start ISO --end ISO]
+                                     the ledger against the model servers' token counters
+                                     (ADR 0018; default: yesterday, stored)
+python -m tollgate_billing check-requests < records.jsonl
+                                     each request as its client saw it (tollgate_bench metering)
+                                     against its ledger row
 
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status
 """
@@ -22,12 +28,14 @@ import contextlib
 import logging
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
+import httpx
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from tollgate_billing.audit import audit, ledger_rows, read_records
 from tollgate_billing.config import Settings
 from tollgate_billing.consumer import Consumer
 from tollgate_billing.db import LedgerRow, RejectRow, make_engine
@@ -44,6 +52,7 @@ from tollgate_billing.invoicing import describe
 from tollgate_billing.ledger import PostgresLedger
 from tollgate_billing.migrate import upgrade
 from tollgate_billing.months import Month
+from tollgate_billing.reconcile import ReconcileError, reconcile, report, store
 
 log = logging.getLogger("tollgate.billing")
 
@@ -227,6 +236,81 @@ async def invoice(settings: Settings, args: argparse.Namespace, now: datetime) -
         await engine.dispose()
 
 
+def _instant(text: str) -> datetime:
+    when = datetime.fromisoformat(text)
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+async def reconcile_command(
+    settings: Settings,
+    args: argparse.Namespace,
+    now: datetime,
+    transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake Prometheus
+) -> int:
+    """Compare the ledger with the model servers' counters. Returns the exit code: 1 on a gap."""
+    prometheus_url = settings.require_prometheus_url()
+    if not settings.reconcile_backends:
+        print("TOLLGATE_BILLING_RECONCILE_BACKENDS is empty: nothing to reconcile", file=sys.stderr)
+        return 1
+    if args.start or args.end:
+        if not (args.start and args.end):
+            print("give both --start and --end", file=sys.stderr)
+            return 1
+        day, start, end = None, _instant(args.start), _instant(args.end)
+        title = f"{start:%Y-%m-%d %H:%M:%S} to {end:%Y-%m-%d %H:%M:%S} UTC (not stored)"
+    else:
+        day = args.day or (now.astimezone(UTC).date() - timedelta(days=1))
+        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+        end = start + timedelta(days=1)
+        title = str(day)
+    if end > now:
+        print(f"{title} hasn't ended yet", file=sys.stderr)
+        return 1
+    engine = make_engine(settings.require_database_url())
+    try:
+        async with httpx.AsyncClient(timeout=30, transport=transport) as http:
+            checks = await reconcile(engine, http, prometheus_url, settings.reconcile_backends,
+                                     start, end, settings.tolerance)  # fmt: skip
+        if day is not None:
+            await store(engine, day, checks)
+    except ReconcileError as e:
+        print(e, file=sys.stderr)
+        return 1
+    finally:
+        await engine.dispose()
+    print(f"reconcile {title}: output tokens, the ledger against the model servers' counters")
+    print("\n".join(report(checks)))
+    print("  (input tokens aren't compared: llama-server counts only prompt tokens it hadn't "
+          "cached)")  # fmt: skip
+    for c in checks:
+        if c.failed and c.gap > 0:
+            print(
+                f"{c.backend}: the server generated {c.gap:,} tokens the ledger doesn't have: "
+                f"requests that skipped the gateway, or lost usage events",
+                file=sys.stderr,
+            )
+        elif c.failed:
+            print(f"{c.backend}: the ledger has {-c.gap:,} tokens more than the server generated",
+                  file=sys.stderr)  # fmt: skip
+    return 1 if any(c.failed for c in checks) else 0
+
+
+async def check_requests_command(settings: Settings) -> int:
+    records = read_records(sys.stdin)
+    engine = make_engine(settings.require_database_url())
+    try:
+        rows = await ledger_rows(engine, [r.request_id for r in records if r.request_id])
+    finally:
+        await engine.dispose()
+    result = audit(records, rows)
+    print(f"{len(records)} requests: {result.matched} completed and billed exactly as the client "
+          f"saw, {result.hung_up} hung up and billed, {result.refused} refused and not billed, "
+          f"{result.unchecked} without a request ID")  # fmt: skip
+    for problem in result.problems:
+        print(f"problem: {problem}", file=sys.stderr)
+    return 1 if result.problems else 0
+
+
 def month_arg(text: str) -> Month:
     try:
         return Month.parse(text)
@@ -255,6 +339,11 @@ def parser() -> argparse.ArgumentParser:
     actions.add_parser("list", help="finalized invoices").add_argument("--month", type=month_arg)
     a = actions.add_parser("verify", help="check a month's invoices against the ledger")
     a.add_argument("--month", type=month_arg)
+    a = commands.add_parser("reconcile", help="the ledger against the model servers' counters")
+    a.add_argument("--day", type=date.fromisoformat, help="a UTC day (default: yesterday)")
+    a.add_argument("--start", help="instead of a day: ISO time, UTC unless it says otherwise")
+    a.add_argument("--end")
+    commands.add_parser("check-requests", help="client records on stdin against the ledger")
     return p
 
 
@@ -267,8 +356,13 @@ def main(argv: list[str] | None = None) -> None:
         print("schema is up to date")
     elif args.command == "status":
         asyncio.run(status(settings))
-    elif args.command == "invoice":
-        code = asyncio.run(invoice(settings, args, datetime.now(UTC)))
+    elif args.command in ("invoice", "reconcile", "check-requests"):
+        if args.command == "invoice":
+            code = asyncio.run(invoice(settings, args, datetime.now(UTC)))
+        elif args.command == "reconcile":
+            code = asyncio.run(reconcile_command(settings, args, datetime.now(UTC)))
+        else:
+            code = asyncio.run(check_requests_command(settings))
         if code:
             raise SystemExit(code)
     else:

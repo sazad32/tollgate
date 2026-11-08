@@ -166,3 +166,83 @@ async def test_the_reconciliation_migration_runs_both_ways(engine) -> None:
     assert "invoices" in await tables()
     await asyncio.to_thread(upgrade, URL)
     assert "reconciliations" in await tables()
+
+
+# --- the commands ---------------------------------------------------------------------------------
+
+
+def settings():
+    from tollgate_billing.config import Settings
+
+    return Settings(database_url=URL, prometheus_url="http://prom", reconcile_backends=BACKENDS)
+
+
+async def run_reconcile(*argv: str, now: datetime, transport) -> int:
+    from tollgate_billing.__main__ import parser, reconcile_command
+
+    return await reconcile_command(settings(), parser().parse_args(["reconcile", *argv]), now,
+                                   transport)  # fmt: skip
+
+
+async def test_the_reconcile_command_checks_and_stores_yesterday(engine, capsys) -> None:
+    await add(engine, ledger_row(1, at(1)))
+    samples = {"llama-server-0": [[(START.timestamp() - 10, 0.0), (at(2).timestamp(), 40.0)]]}
+
+    code = await run_reconcile(now=at(26), transport=prometheus(samples))
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "reconcile 2026-11-07: output tokens" in out
+    assert "llama-server-0" in out and "exact" in out
+    async with engine.connect() as conn:
+        assert len((await conn.execute(select(ReconciliationRow.__table__))).all()) == 2
+
+
+async def test_the_reconcile_command_fails_on_a_gap_and_says_what_it_means(engine, capsys) -> None:
+    samples = {"llama-server-0": [[(START.timestamp() - 10, 0.0), (at(2).timestamp(), 40.0)]]}
+
+    code = await run_reconcile("--day", "2026-11-07", now=at(26), transport=prometheus(samples))
+
+    assert code == 1
+    assert "llama-server-0: the server generated 40 tokens the ledger doesn't have" in (
+        capsys.readouterr().err
+    )
+
+
+async def test_a_window_is_reconciled_without_storing_it(engine, capsys) -> None:
+    samples = {"llama-server-0": [[(at(1).timestamp(), 0.0), (at(1.5).timestamp(), 0.0)]]}
+
+    code = await run_reconcile("--start", "2026-11-07T00:30:00", "--end", "2026-11-07T02:00:00",
+                               now=at(26), transport=prometheus(samples))  # fmt: skip
+
+    assert code == 0
+    assert "(not stored)" in capsys.readouterr().out
+    async with engine.connect() as conn:
+        assert (await conn.execute(select(ReconciliationRow.__table__))).all() == []
+
+
+async def test_a_day_that_has_not_ended_is_refused(engine, capsys) -> None:
+    code = await run_reconcile("--day", "2026-11-07", now=at(23), transport=prometheus({}))
+
+    assert code == 1
+    assert "2026-11-07 hasn't ended yet" in capsys.readouterr().err
+
+
+async def test_the_check_requests_command_reads_client_records_on_stdin(
+    engine, capsys, monkeypatch
+) -> None:
+    import io
+
+    from tollgate_billing.__main__ import check_requests_command
+
+    await add(engine, ledger_row(1, at(1)))
+    lines = (f'{{"request_id": "{1:032x}", "tenant": "support", "outcome": "completed", '
+             f'"input_tokens": 75, "output_tokens": 40, "chunks": 40}}\n'
+             f'{{"request_id": "{2:032x}", "tenant": "support", "outcome": "completed", '
+             f'"input_tokens": 75, "output_tokens": 40, "chunks": 40}}\n')  # fmt: skip
+    monkeypatch.setattr("sys.stdin", io.StringIO(lines))
+
+    assert await check_requests_command(settings()) == 1
+    captured = capsys.readouterr()
+    assert "2 requests: 1 completed and billed exactly as the client saw" in captured.out
+    assert f"{2:032x}: completed but not in the ledger" in captured.err
