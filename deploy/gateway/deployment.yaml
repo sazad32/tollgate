@@ -41,8 +41,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          # Built by .github/workflows/gateway-image.yml from commit df3b98c. Pinned by digest.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-df3b98c@sha256:cc4424194dbe6117a5845de10bdb00cb05d0381a500d481bceaecd59eadcaa71
+          # Built by .github/workflows/gateway-image.yml from commit 265687a. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-265687a@sha256:1b81b9d29fbe8b485c919087d7219ce4f9791992afe97e0a5ee00ff9f9ac78cd
           ports:
             - name: http
               containerPort: 8000
@@ -60,6 +60,12 @@ spec:
                   name: vllm-api-key
                   key: VLLM_API_KEY
                   optional: true
+            # Token buckets (ADR 0012): redis://:<password>@redis.tollgate.svc:6379/0
+            - name: TOLLGATE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: TOLLGATE_REDIS_URL
           readinessProbe:
             httpGet:
               path: /readyz
