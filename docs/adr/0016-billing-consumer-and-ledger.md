@@ -1,6 +1,6 @@
 # 0016 — Billing consumer: a Redis consumer group into an append-only ledger, exactly once by key
 
-- Status: accepted
+- Status: accepted; amended by ADR 0018 (estimated rows are measured, not corrected)
 - Date: 2026-11-08
 
 ## Context
@@ -108,6 +108,9 @@ early (hard problem #1): the client hung up, or the stream broke. And it must ne
 - **Billed is not always exact.** `estimated` rows carry the gateway's estimates: the prompt
   estimate overcounts SmolLM3, and one token per chunk undercounts vLLM. The ledger keeps
   `token_source`, so week 13's reconciliation can find and correct them, with new rows.
+  *Amended by ADR 0018:* the reconciliation measures how far estimates drift, by backend, but
+  doesn't correct rows. A server's counter is a total over many requests, and the prompt isn't
+  stored, so a per-row correction would be a guess.
 - **Failed requests cost us, not the tenant:** their measured tokens are in the ledger, billed at
   zero. That includes Claude, which Anthropic still charges for.
 - **Rejects need a person.** A rejected entry is billed at nothing until someone fixes it and adds
