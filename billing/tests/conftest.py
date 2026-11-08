@@ -73,8 +73,14 @@ def ledger() -> MemoryLedger:
     return MemoryLedger()
 
 
+@pytest.fixture
+def redis_server() -> fakeredis.FakeServer:
+    """Set `.connected = False` to take Redis down, True to bring it back."""
+    return fakeredis.FakeServer()
+
+
 @pytest_asyncio.fixture
-async def redis():
-    client = fakeredis.FakeAsyncRedis()
+async def redis(redis_server):
+    client = fakeredis.FakeAsyncRedis(server=redis_server)
     yield client
     await client.aclose()
