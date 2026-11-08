@@ -25,17 +25,11 @@ from tollgate_gateway.hosted import (
     hosted_failure,
     unsupported_reason,
 )
-from tollgate_gateway.ratelimit import (
-    Reservation,
-    StreamMeter,
-    limit_headers,
-    rate_limited,
-    reserve,
-    usage_from_body,
-    usage_total,
-)
+from tollgate_gateway.limits import estimate_tokens, prompt_estimate
+from tollgate_gateway.ratelimit import StreamMeter, limit_headers, rate_limited, reserve
 from tollgate_gateway.router import Route, choose_route, local_order
 from tollgate_gateway.upstream import open_local
+from tollgate_gateway.usage import RequestUsage, Status, Tokens, tokens_from_body
 
 log = logging.getLogger("tollgate.gateway")
 router = APIRouter()  # open: health checks only
@@ -90,6 +84,7 @@ async def list_models(request: Request) -> dict:
 async def chat_completions(request: Request) -> Response:
     request_id: str = request.state.request_id
     principal: Principal = request.state.principal
+    started_at = request.app.state.clock()
     try:
         payload = await request.json()
     except ValueError:
@@ -110,6 +105,18 @@ async def chat_completions(request: Request) -> Response:
     if reservation is not None and not reservation.decision.allowed:
         return rate_limited(reservation)
     headers = limit_headers(reservation.decision) if reservation else {}
+    # From here the request ends in exactly one of: usage.record() (a model ran: settle with the
+    # real count, emit the usage event, ADR 0015) or usage.refund() (no model ran: no event).
+    usage = RequestUsage(
+        reservation=reservation,
+        emitter=request.app.state.usage,
+        request_id=request_id,
+        tenant_id=tenant.id,
+        credential=credential(principal),
+        stream=chat.stream,
+        started_at=started_at,
+        clock=request.app.state.clock,
+    )
 
     # 2. Route (ADR 0013). Choosing a backend and counting the request against it (open_local)
     # happen with no await in between, so concurrent requests never decide on the same snapshot.
@@ -123,20 +130,17 @@ async def chat_completions(request: Request) -> Response:
         hosted_unsupported=unsupported_reason(payload) if tenant.allows_hosted else None,
     )
     if route.kind == "refused":
-        if reservation:
-            await reservation.settle(0)  # nothing was generated: full refund
+        await usage.refund()
         type_ = "upstream_error" if route.status >= 500 else "invalid_request_error"
         response = openai_error(route.status, route.message, type_, route.code)
         response.headers.update(headers)
         return response
 
-    # 3. Forward, and settle when the request ends.
+    # 3. Forward, and record usage when the request ends.
     if route.kind == "hosted":
         assert hosted is not None  # the router only says "hosted" when it is configured
         log.info("request %s: %s -> hosted (%s)", request_id, tenant.id, route.reason)
-        return await forward_hosted(
-            hosted, principal, payload, chat, request_id, reservation, headers
-        )
+        return await forward_hosted(hosted, principal, payload, chat, request_id, usage, headers)
 
     # 4. Local: wait for a fair turn at a slot (ADR 0014). The queue says which backend the slot
     # is on; the others stay in the order as failover.
@@ -147,8 +151,7 @@ async def chat_completions(request: Request) -> Response:
             tenant.id, request_id, loads.available, request.is_disconnected
         )
         if not isinstance(outcome, Ticket):
-            if reservation:
-                await reservation.settle(0)  # nothing was generated: full refund
+            await usage.refund()
             if outcome is None:
                 return Response(status_code=499)  # the client hung up; nobody reads this
             response = queue_refused(outcome)
@@ -160,13 +163,21 @@ async def chat_completions(request: Request) -> Response:
             order = (ticket.backend, *(name for name in order if name != ticket.backend))
         route = Route("local", route.reason, order)
     try:
-        return await forward_local(request, route, payload, chat, reservation, headers, ticket)
+        return await forward_local(request, route, payload, chat, usage, headers, ticket)
     except BaseException:
-        # A safety net: forward_local releases the slot on every path it knows about.
-        if ticket is not None:
-            with anyio.CancelScope(shield=True):
+        # A safety net: forward_local releases the slot and records usage on every path it knows.
+        with anyio.CancelScope(shield=True):
+            if ticket is not None:
                 await ticket.release()
+            await usage.refund()
         raise
+
+
+def credential(principal: Principal) -> str:
+    """Which credential made the call, for the usage event: an API key's id or a token's subject."""
+    if principal.key_id:
+        return f"key:{principal.key_id}"
+    return f"token:{principal.subject}"
 
 
 async def forward_local(
@@ -174,11 +185,14 @@ async def forward_local(
     route: Route,
     payload: dict,
     chat: ChatCompletionRequest,
-    reservation: Reservation | None,
+    usage: RequestUsage,
     headers: dict[str, str],
     ticket: Ticket | None = None,
 ) -> Response:
     request_id: str = request.state.request_id
+    model = request.app.state.settings.local_model  # every local backend serves it (ADR 0005)
+    estimate_in = prompt_estimate(payload)
+    estimate_out = estimate_tokens(payload) - estimate_in
 
     async def release() -> None:
         if ticket is not None:
@@ -203,25 +217,27 @@ async def forward_local(
     except httpx.HTTPError as exc:
         log.warning("request %s: no local backend answered: %r", request_id, exc)
         await release()
-        if reservation:
-            await reservation.settle(0)  # nothing was generated: full refund
+        await usage.refund()  # nothing was generated
         return upstream_failure(exc)
     log.info("request %s: %s -> %s (%s)",
              request_id, request.state.principal.tenant.id, backend, route.reason)  # fmt: skip
     headers = {**headers, "x-tollgate-backend": backend}
 
-    # Plain replies and errors settle right away, streams when they end (in relay()).
+    # Plain replies and errors are recorded right away, streams when they end (in relay()).
     if upstream.status_code != 200 or not chat.stream:
         try:
             response = await buffered(upstream)
         finally:
             await release()
-        if reservation:
-            ok = 200 <= response.status_code < 300
-            used = usage_from_body(response.body) if ok else 0
-            await reservation.settle(reservation.reserved if used is None else used)
+        if 200 <= response.status_code < 300:
+            tokens = tokens_from_body(bytes(response.body), estimate_in, estimate_out)
+            await usage.record(model, backend, "completed", tokens)
+        else:
+            await usage.refund()  # the model refused or failed: nothing to charge
         response.headers.update(headers)
         return response
+
+    meter = StreamMeter(keep_usage)
 
     async def close() -> None:
         try:
@@ -229,14 +245,11 @@ async def forward_local(
         finally:
             await release()  # the slot goes back when the stream ends, however it ends
 
+    async def end(status: Status) -> None:
+        await usage.record(model, backend, status, meter.tokens(estimate_in))
+
     return StreamingResponse(
-        relay(
-            upstream.aiter_bytes(),
-            close,
-            request_id,
-            StreamMeter(keep_usage),
-            reservation,
-        ),  # fmt: skip
+        relay(upstream.aiter_bytes(), close, request_id, meter, end),
         media_type="text/event-stream",
         headers={**STREAM_HEADERS, **headers},
     )
@@ -248,7 +261,7 @@ async def forward_hosted(
     payload: dict,
     chat: ChatCompletionRequest,
     request_id: str,
-    reservation: Reservation | None,
+    usage: RequestUsage,
     headers: dict[str, str],
 ) -> Response:
     headers = {**headers, "x-tollgate-backend": "hosted"}
@@ -260,26 +273,33 @@ async def forward_hosted(
     except DataPolicyError:
         log.error("request %s: the router sent a %s request to the hosted model",
                   request_id, principal.tenant.data_policy)  # fmt: skip
-        if reservation:
-            await reservation.settle(0)
+        await usage.refund()
         return openai_error(403, "Your tenant's data policy keeps requests local.",
                             "invalid_request_error", "data_policy")  # fmt: skip
     except anthropic.APIError as exc:
         log.warning("request %s: hosted model failed before responding: %r", request_id, exc)
-        if reservation:
-            await reservation.settle(0)  # nothing was generated: full refund
+        await usage.refund()  # nothing was generated
         response = hosted_failure(exc)
         response.headers.update(headers)
         return response
 
     if not chat.stream:
-        if reservation:
-            used = usage_total(reply["usage"])
-            await reservation.settle(reservation.reserved if used is None else used)
+        counts = reply["usage"]
+        tokens = Tokens(counts["prompt_tokens"], counts["completion_tokens"], "reported")
+        await usage.record(reply["model"], "hosted", "completed", tokens)
         return JSONResponse(reply, headers=headers)
-    keep_usage = bool((payload.get("stream_options") or {}).get("include_usage"))
+
+    meter = StreamMeter(keep_usage=bool((payload.get("stream_options") or {}).get("include_usage")))
+    estimate_in = prompt_estimate(payload)
+
+    async def end(status: Status) -> None:
+        # The model that answered: named in the stream's first event (a refusal fallback can
+        # change it), or the configured one if the stream broke before that.
+        model = stream.model or hosted.model
+        await usage.record(model, "hosted", status, meter.tokens(estimate_in))
+
     return StreamingResponse(
-        relay(stream.chunks(), stream.close, request_id, StreamMeter(keep_usage), reservation),
+        relay(stream.chunks(), stream.close, request_id, meter, end),
         media_type="text/event-stream",
         headers={**STREAM_HEADERS, **headers},
     )
@@ -290,7 +310,7 @@ async def relay(
     close: Callable[[], Awaitable[None]],
     request_id: str,
     meter: StreamMeter,
-    reservation: Reservation | None,
+    end: Callable[[Status], Awaitable[None]],
 ) -> AsyncIterator[bytes]:
     """Pass each event on as soon as it's complete, watching usage on the way. Works the same for
     a local model server's stream and the hosted model's translated one.
@@ -298,26 +318,34 @@ async def relay(
     .NET: an IAsyncEnumerable<byte[]> the server writes out and flushes chunk by chunk.
     Gotcha: if the client disconnects, Starlette cancels this generator, and the CancelledError
     surfaces at the `async for` below. The `finally` then closes the stream (`close`), so the model
-    stops generating tokens nobody will read, and settles the reservation.
+    stops generating tokens nobody will read, and records what was used (`end`).
     """
+    finished = False
     try:
         async for chunk in chunks:
             for event in meter.feed(chunk):
                 yield event
         if rest := meter.flush():
             yield rest
+        finished = True
     except httpx.HTTPError as exc:
         # The 200 status is already sent, so the error goes into the stream instead.
         # (The hosted stream reports its own errors this way, in hosted.py.)
         log.warning("request %s: upstream stream broke: %r", request_id, exc)
+        meter.failed = True
         yield sse_error_event("The model server stopped responding mid-stream.")
     finally:
         # Starlette runs on anyio, where a cancelled task is cancelled again at *every* await.
-        # Shield the cleanup, or it'd be interrupted: connection leaked, bucket left unsettled.
+        # Shield the cleanup, or it'd be interrupted: connection leaked, usage never recorded.
         with anyio.CancelScope(shield=True):
             await close()
-            if reservation:
-                await reservation.settle(meter.actual(reservation.prompt_estimate))
+            if meter.failed:
+                status: Status = "failed"
+            elif finished:
+                status = "completed"
+            else:
+                status = "client_disconnected"
+            await end(status)
 
 
 async def buffered(upstream: httpx.Response) -> Response:

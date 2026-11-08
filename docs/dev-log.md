@@ -2,6 +2,20 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-08 — Week 10: usage events
+- Changed: every request a model ran ends in one usage event (idempotency key `<request id>:usage`,
+  the model that answered, reported or estimated tokens, how it ended) in the Redis stream
+  `tollgate:usage`; the request only appends to memory, a background loop writes, retries while Redis
+  is down (ADR 0015). Redis is now a StatefulSet with an append-only file on node-2. 34 tests written
+  first.
+- Broke: two tests read the emitter's counters a moment before it updated them; a rate-limit test
+  needed both requests in flight at once, because the fake model answered too fast to hold a
+  reservation.
+- Measured: events matched the client's usage (74/7, 74/60, Claude 16/16); a client that read 5
+  chunks and hung up was charged 19 estimated output tokens, already sent into the port-forward's
+  buffers; events survived a Redis restart, and with Redis stopped a request still got 200 and its
+  event arrived within seconds of Redis returning.
+
 ## 2026-11-07 — Week 9: fair queuing (Phase 2 gate met)
 - Changed: local requests wait in the gateway, in Redis, for a slot on a specific backend; each free
   slot goes to the tenant with the fewest requests running; 429 + Retry-After past 16 waiting or

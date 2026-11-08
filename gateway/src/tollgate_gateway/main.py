@@ -34,6 +34,7 @@ from tollgate_gateway.queue import FairQueue
 from tollgate_gateway.routes import router
 from tollgate_gateway.tenants import AuthStore
 from tollgate_gateway.upstream import make_client
+from tollgate_gateway.usage import UsageEmitter
 
 
 class RequestIdMiddleware:
@@ -139,14 +140,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             poll_s=settings.queue_poll_s,
         )  # fmt: skip
         renewals = asyncio.create_task(app.state.admission.run_renewals())
+    # Usage events for billing (ADR 0015), in the same Redis. The request path only appends to
+    # memory; this loop writes to the stream.
+    app.state.usage = None
+    emitting = None
+    if redis is not None:
+        app.state.usage = UsageEmitter(
+            redis, stream=settings.usage_stream, max_buffered=settings.usage_buffer_max,
+            retry_s=settings.usage_retry_s,
+        )  # fmt: skip
+        emitting = asyncio.create_task(app.state.usage.run())
+    else:
+        log.warning("TOLLGATE_REDIS_URL not set: no usage events")
     try:
         yield
     finally:
-        for task in (poller, renewals):
+        for task in (poller, renewals, emitting):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        if app.state.usage is not None:
+            await app.state.usage.flush(timeout_s=5.0)  # what's still queued, before Redis closes
         if app.state.hosted is not None:
             await app.state.hosted.client.close()
         await app.state.upstream.aclose()

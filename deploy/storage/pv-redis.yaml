@@ -1,0 +1,27 @@
+# Redis's append-only file on node-2's data disk (ADR 0006, ADR 0015): the usage stream must survive a
+# restart. Pins Redis to node-2, next to Postgres.
+# One-time, needs sudo on vps-node-2. Redis runs as user and group 999:
+#   sudo mkdir -p /mnt/storage/tollgate/redis && sudo chown 999:999 /mnt/storage/tollgate/redis
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tollgate-redis-vps-node-2
+  labels:
+    app.kubernetes.io/part-of: tollgate
+    tollgate/purpose: redis
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: tollgate-local
+  local:
+    path: /mnt/storage/tollgate/redis
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [vps-node-2]
