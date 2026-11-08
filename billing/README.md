@@ -1,7 +1,8 @@
 # tollgate-billing
 
 Reads usage events from the Redis stream `tollgate:usage` and writes each one, exactly once, to the
-usage ledger in Postgres (ADR 0016). The event format is in `docs/usage-events.md`.
+usage ledger in Postgres (ADR 0016). The event format is in `docs/usage-events.md`. Once a month it
+prices the ledger into one invoice per tenant (ADR 0017).
 
 | Module | What it does |
 | --- | --- |
@@ -9,7 +10,11 @@ usage ledger in Postgres (ADR 0016). The event format is in `docs/usage-events.m
 | `policy.py` | The billing rule: how many of a request's tokens the tenant pays for |
 | `ledger.py` | Writes a batch in one transaction, `ON CONFLICT (idempotency_key) DO NOTHING` |
 | `consumer.py` | The consumer group loop: read, write, acknowledge, take over, trim |
-| `db.py`, `migrations/` | The `usage_ledger` and `usage_rejects` tables (Alembic) |
+| `months.py` | A calendar month in UTC: the invoice period |
+| `prices.py` | Reads the price list (`deploy/billing/prices.toml`) and charges tokens across its bands |
+| `invoicing.py` | A tenant's month of usage into invoice lines; no database |
+| `invoices.py` | Preview, finalize, show, list and verify invoices in Postgres |
+| `db.py`, `migrations/` | The ledger, rejects and invoice tables (Alembic) |
 
 ## Tests
 Most tests need nothing: fake Redis and an in-memory ledger. The ledger's SQL is tested against a

@@ -85,6 +85,11 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   go to `usage_rejects`. Billing rule: completed = all, client_disconnected = estimate, failed = 0. Trims
   the stream only past 24 h and acknowledged by every group. Ledger SQL tests need a real Postgres
   (`TOLLGATE_TEST_DATABASE_URL`; CI has one, locally see billing/README.md), else they skip.
+- Invoices (ADR 0017): prices per model in `deploy/billing/prices.toml` (Decimal strings, graduated bands,
+  versions from the 1st of a month; mounted as a ConfigMap). A month's invoice = ledger rows *recorded*
+  in it; lines rounded half-up to the cent, total = sum of lines. CronJob `tollgate-billing-invoices`
+  finalizes last month at 06:00 UTC on the 1st (locks the ledger, idempotent, unpriced model = no invoice
+  + exit 1) and verifies. `invoice_items` (PK = ledger row) keeps a row off two invoices.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -128,6 +133,7 @@ uv run python -m tollgate_bench fairness --url ... --trickle-url ...  # two-tena
 kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XLEN tollgate:usage'  # usage events
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status   # billing: group, ledger, per tenant
 kubectl apply -f deploy/billing/migrate-job.yaml   # billing's migrations, once per release (then delete the Job)
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing invoice preview support   # also: finalize|show|list|verify
 docker run -d --rm --name tollgate-test-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:54329:5432 postgres:18.6-bookworm  # then TOLLGATE_TEST_DATABASE_URL (billing/README.md)
 ```
 (Add new commands here as they are created.)

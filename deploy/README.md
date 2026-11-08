@@ -13,7 +13,7 @@ deploy/
   keycloak/              Keycloak 26 and the tollgate realm export (ADR 0003, 0010)
   redis/                 Redis 8: token buckets, fair queue, usage stream (ADR 0012, 0014, 0015)
   gateway/               the API gateway: Deployment (2 replicas), Service, settings, migration Job (0009, 0010)
-  billing/               the billing consumer: Deployment, settings, database and migration Jobs (ADR 0016)
+  billing/               billing: consumer Deployment, invoice CronJob, prices.toml, database and migration Jobs (0016, 0017)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
 ```
@@ -216,9 +216,30 @@ kubectl -n tollgate exec postgres-0 -- psql -U postgres -d billing -c "SELECT st
 kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XGROUP SETID tollgate:usage billing 0'
 ```
 - **Shipping a code change:** as for the gateway, with the *Billing image* workflow, and the new
-  image in `billing/deployment.yaml` and `billing/migrate-job.yaml`.
+  image in `billing/deployment.yaml`, `billing/migrate-job.yaml` and `billing/cronjob.yaml`.
 - **The stream is trimmed** by billing, once a minute: only entries every group has acknowledged and
   that are older than 24 hours (`TOLLGATE_BILLING_RETENTION_S` in `billing/billing.env`).
+
+### Invoices
+One invoice per tenant per month (ADR 0017). It holds the ledger rows billing *recorded* that
+month, priced from `billing/prices.toml`. The CronJob `tollgate-billing-invoices` finalizes last
+month at 06:00 UTC on the 1st, then verifies it. A finalized invoice never changes.
+```powershell
+$billing = "kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing"
+Invoke-Expression "$billing invoice preview support"                 # this month so far, not stored
+Invoke-Expression "$billing invoice list"                            # finalized invoices
+Invoke-Expression "$billing invoice show support 2026-11"
+Invoke-Expression "$billing invoice verify --month 2026-11"          # every row on exactly one invoice
+# the CronJob's last runs, and one run by hand (safe to repeat: existing invoices are left alone)
+kubectl -n tollgate get jobs -l app.kubernetes.io/name=tollgate-billing-invoices
+kubectl -n tollgate create job --from=cronjob/tollgate-billing-invoices invoices-manual
+```
+- **Changing a price:** add a new `[[prices]]` entry with a later `from` (the 1st of a month), never
+  edit one already used; merge the PR and `kubectl apply -k deploy`. The tests refuse a malformed
+  file and a model the gateway uses without a price.
+- **A failed run** means a tenant used a model with no price (that tenant has no invoice yet; the
+  others do) or verify found a problem. `kubectl -n tollgate logs job/<name>` says which. Add the
+  price, apply, and run the Job by hand.
 
 ## Look at the dashboards
 ```powershell
