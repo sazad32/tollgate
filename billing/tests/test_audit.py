@@ -103,3 +103,11 @@ def test_records_are_read_from_json_lines_and_extra_fields_ignored() -> None:
         ClientRecord(D, "billing", "completed", 75, 40, 41),
         ClientRecord(None, "support", "error", None, None, 0),
     ]
+
+
+def test_a_byte_order_mark_from_a_windows_pipe_is_ignored() -> None:
+    # PowerShell 5.1 adds one when it pipes text into a program (kubectl exec -i).
+    line = (f'\ufeff{{"request_id": "{A}", "tenant": "support", "outcome": "completed", '
+            '"input_tokens": 75, "output_tokens": 40, "chunks": 0}')  # fmt: skip
+
+    assert read_records([line]) == [ClientRecord(A, "support", "completed", 75, 40, 0)]

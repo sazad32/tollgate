@@ -49,6 +49,7 @@ class AuditResult:
 def read_records(lines: Iterable[str]) -> list[ClientRecord]:
     records = []
     for line in lines:
+        line = line.lstrip("﻿")  # a byte-order mark: PowerShell 5.1 adds one when piping
         if line.strip():
             d = json.loads(line)
             records.append(

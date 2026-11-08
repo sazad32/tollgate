@@ -350,6 +350,7 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # not a line per Prometheus query
     settings = Settings()
     if args.command == "migrate":
         upgrade(settings.require_database_url())  # synchronous: Alembic runs its own event loop
