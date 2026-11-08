@@ -1,14 +1,13 @@
-# Redis for the gateway's token buckets (ADR 0012). One instance, no persistence: losing the buckets
-# is harmless, because a missing bucket reads as full. Week 10's usage stream will need persistence
-# (an append-only file on a volume); that's when this becomes a StatefulSet.
+# Redis for the token buckets (ADR 0012), the fair queue (ADR 0014) and the usage stream (ADR 0015).
+# One instance. The usage stream must survive a restart, so Redis keeps an append-only file (AOF) on
+# node-2's data disk, synced every second: a crash loses at most the last second of writes.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: redis
 spec:
+  serviceName: redis
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: redis
@@ -41,15 +40,18 @@ spec:
             - redis-server
             - --requirepass
             - $(REDIS_PASSWORD)
-            # No snapshots, no append-only file: nothing here needs to survive a restart (yet).
+            # Durability: every write goes to the append-only file, fsynced once a second. No
+            # snapshots on top (the AOF already holds everything).
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
             - --save
             - ""
-            - --appendonly
-            - "no"
-            # Hard memory cap. When full, evict only keys with an expiry (the buckets), never keys
-            # without one, such as week 10's usage stream.
+            # Hard memory cap. When full, evict only keys with an expiry (buckets, queue counters),
+            # never keys without one, such as the usage stream: writing to it fails instead.
             - --maxmemory
-            - 64mb
+            - 256mb
             - --maxmemory-policy
             - volatile-lru
           ports:
@@ -66,9 +68,9 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
-            limits:
               memory: 128Mi
+            limits:
+              memory: 384Mi # 256 MB of data, plus the AOF rewrite's copy-on-write headroom
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -76,7 +78,16 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - name: data
-              mountPath: /data # Redis's working directory; empty, as nothing is saved
-      volumes:
-        - name: data
-          emptyDir: {}
+              mountPath: /data # Redis's working directory: the append-only file lives here
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: tollgate-local
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi
+        selector:
+          matchLabels:
+            tollgate/purpose: redis

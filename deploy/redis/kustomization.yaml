@@ -5,5 +5,5 @@ labels:
   - pairs:
       app.kubernetes.io/part-of: tollgate
 resources:
-  - deployment.yaml
+  - statefulset.yaml
   - service.yaml
