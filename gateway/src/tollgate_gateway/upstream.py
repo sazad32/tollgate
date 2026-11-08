@@ -64,6 +64,9 @@ async def open_local(
         request = client.build_request(
             "POST", url, json=json_body, headers={"X-Request-ID": request_id}
         )
+        # Count it now, before the first await: concurrent requests then see it straight away.
+        # (Counted after the answer, a burst between two polls all went to the same backend.)
+        loads.sent(name)
         try:
             response = await client.send(request, stream=True)
         except RETRY_SAFE as exc:
@@ -74,6 +77,5 @@ async def open_local(
             log.warning("request %s: %s failed before responding (%r), trying %s",
                         request_id, name, exc, attempts[number])  # fmt: skip
             continue
-        loads.sent(name)
         return name, response
     raise AssertionError("unreachable")

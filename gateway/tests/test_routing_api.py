@@ -4,6 +4,7 @@ Three local backends (vLLM, node-1, node-2) on one fake transport, told apart by
 fake Anthropic API. Tenants: support is local_only, engineering is hosted_allowed.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 
@@ -103,6 +104,19 @@ async def test_a_down_backend_is_skipped(gateway, upstream) -> None:
     response = await gateway.chat("support")
 
     assert response.headers["x-tollgate-backend"] in {"node-1", "node-2"}
+
+
+async def test_a_burst_between_two_polls_is_spread(gateway, upstream) -> None:
+    # A request counts against its backend the moment it is sent, not when the backend answers,
+    # or a burst would all land on whichever backend looked idlest at the last poll.
+    upstream.down.add("vllm")
+    await gateway.poll()
+    upstream.delay = 0.05
+
+    responses = await asyncio.gather(*(gateway.chat("support") for _ in range(4)))
+
+    backends = sorted(r.headers["x-tollgate-backend"] for r in responses)
+    assert backends == ["node-1", "node-1", "node-2", "node-2"]
 
 
 async def test_a_refused_connection_fails_over_to_the_next_backend(gateway, upstream) -> None:

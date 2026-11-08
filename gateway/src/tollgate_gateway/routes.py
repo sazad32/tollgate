@@ -100,9 +100,18 @@ async def chat_completions(request: Request) -> Response:
         where = ".".join(str(part) for part in first["loc"]) or "body"
         return openai_error(400, f"{where}: {first['msg']}", "invalid_request_error")
 
-    # 1. Route (ADR 0013). A refusal (data policy, no backend) happens before any tokens are held.
+    # 1. Reserve the estimate (ADR 0012). None: no limits applied (not configured, or Redis down).
     settings = request.app.state.settings
     tenant = principal.tenant
+    reservation = await reserve(
+        request.app.state.buckets, tenant.id, settings.limit_for(tenant.tier), payload
+    )
+    if reservation is not None and not reservation.decision.allowed:
+        return rate_limited(reservation)
+    headers = limit_headers(reservation.decision) if reservation else {}
+
+    # 2. Route (ADR 0013). Choosing a backend and counting the request against it (open_local)
+    # happen with no await in between, so concurrent requests never decide on the same snapshot.
     loads: LoadTracker = request.app.state.loads
     hosted: HostedModel | None = request.app.state.hosted
     route = choose_route(
@@ -113,16 +122,12 @@ async def chat_completions(request: Request) -> Response:
         hosted_unsupported=unsupported_reason(payload) if tenant.allows_hosted else None,
     )
     if route.kind == "refused":
+        if reservation:
+            await reservation.settle(0)  # nothing was generated: full refund
         type_ = "upstream_error" if route.status >= 500 else "invalid_request_error"
-        return openai_error(route.status, route.message, type_, route.code)
-
-    # 2. Reserve the estimate (ADR 0012). None: no limits applied (not configured, or Redis down).
-    reservation = await reserve(
-        request.app.state.buckets, tenant.id, settings.limit_for(tenant.tier), payload
-    )
-    if reservation is not None and not reservation.decision.allowed:
-        return rate_limited(reservation)
-    headers = limit_headers(reservation.decision) if reservation else {}
+        response = openai_error(route.status, route.message, type_, route.code)
+        response.headers.update(headers)
+        return response
 
     # 3. Forward, and settle when the request ends.
     if route.kind == "hosted":

@@ -4,6 +4,7 @@ tenant database and a fake Keycloak. No network, no real model, no real database
 .NET: like WebApplicationFactory<Program> with the HttpClient handler and stores swapped for fakes.
 """
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Callable
@@ -52,6 +53,7 @@ class FakeUpstream:
         self.script: list[httpx.Response | Exception] = []
         self.busy: dict[str, int] = {}  # host -> requests running there; missing = idle
         self.down: set[str] = set()  # hosts that refuse connections
+        self.delay = 0.0  # seconds before answering a chat request, like a model reading the prompt
 
     def metrics(self, host: str) -> httpx.Response:
         if host in self.down:
@@ -75,6 +77,8 @@ class FakeUpstream:
         self.requests.append(request)
         if request.url.host in self.down:
             raise httpx.ConnectError("connection refused")
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.script:
             step = self.script.pop(0)
             if isinstance(step, Exception):
