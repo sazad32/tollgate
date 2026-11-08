@@ -227,11 +227,11 @@ async def store(engine: AsyncEngine, day: date, checks: list[Check]) -> None:
 
 
 def report(checks: list[Check]) -> list[str]:
-    out = [f"  {'backend':<16}{'ledger':>9}{'(estimated)':>13}{'server':>9}{'gap':>7}"
+    out = [f"  {'backend':<16}{'ledger':>9}{'(estimated)':>13}{'server':>11}{'gap':>11}"
            f"{'allowed':>9}  status"]  # fmt: skip
     for c in checks:
         server = "-" if c.server is None else f"{c.server:,}"
         gap = "-" if c.gap is None else f"{c.gap:+,}"
-        out.append(f"  {c.backend:<16}{c.ledger:>9,}{c.estimated:>13,}{server:>9}{gap:>7}"
+        out.append(f"  {c.backend:<16}{c.ledger:>9,}{c.estimated:>13,}{server:>11}{gap:>11}"
                    f"{c.allowed:>9,}  {c.status}")  # fmt: skip
     return out

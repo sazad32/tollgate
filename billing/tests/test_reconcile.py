@@ -164,3 +164,12 @@ async def test_a_prometheus_error_is_raised_not_read_as_zero() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         with pytest.raises(ReconcileError, match="bad query"):
             await fetch_series(http, "http://prom:9090", backend, START, END)
+
+
+def test_the_report_keeps_large_numbers_apart() -> None:
+    from tollgate_billing.reconcile import report
+
+    big = judge("llama-server-0", reported=0, estimated=0, server=157_923, tolerance=STRICT)
+
+    row = report([big])[1].split()
+    assert row == ["llama-server-0", "0", "0", "157,923", "+157,923", "0", "gap"]
