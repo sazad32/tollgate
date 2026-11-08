@@ -1,7 +1,10 @@
 # Usage events (schema version 1)
 
 The gateway writes one event per request a model ran to the Redis stream `tollgate:usage`
-(ADR 0015). Billing reads them from there (week 11). This page is the contract between the two.
+(ADR 0015). Billing reads them from there into the usage ledger (ADR 0016). This page is the
+contract between the two: `gateway/src/tollgate_gateway/usage.py` writes it,
+`billing/src/tollgate_billing/events.py` reads it, and `billing/tests/test_contract.py` checks they
+agree.
 
 ## When there is an event
 - **Yes:** a model accepted the request (HTTP 200 from a local backend, or a reply from the hosted
@@ -39,9 +42,36 @@ Hosted requests that fell back after a refusal count every attempt, as Anthropic
   it was holding (up to 10,000). An event dropped because that buffer was full is logged in full at
   ERROR level (`usage event dropped`), so it can be replayed by hand.
 
+## Consumers (ADR 0016)
+- **Billing** reads the stream as the consumer group `billing`, and acknowledges an entry only
+  after the ledger's transaction commits. Its ledger is keyed by `idempotency_key`, so a copy is
+  skipped, never counted twice.
+- **What billing refuses.** An entry it can't trust goes to the `usage_rejects` table with the
+  reason, and is acknowledged, so it can't block the stream. That covers:
+  - an unknown `v`;
+  - a missing or malformed field;
+  - text over the column sizes (`tenant_id` and `backend` 64 characters, `credential` and `model`
+    200);
+  - tokens over 2,147,483,647.
+
+  Extra fields are ignored, so adding one doesn't need billing to change first.
+- **What a tenant pays for:**
+  - `completed`: all tokens;
+  - `client_disconnected`: the estimate;
+  - `failed`: nothing.
+
+  The ledger keeps both the measured and the billed tokens.
+- **Trimming.** Billing trims the stream once a minute, but only entries that every consumer group
+  has acknowledged and that are older than 24 hours. A new consumer group can use the same stream;
+  it holds back trimming until it has caught up.
+- **Replaying** a day of events into the ledger is safe, as copies are skipped:
+  `XGROUP SETID tollgate:usage billing 0`.
+
 ## Reading it
 ```powershell
 kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XLEN tollgate:usage'
 kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XRANGE tollgate:usage - + COUNT 5'
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status   # group, ledger, per tenant
 ```
-In Python: `UsageEvent.from_fields(fields)` in `tollgate_gateway/usage.py` reads an entry back.
+In Python: `UsageEvent.from_fields(fields)` in `tollgate_gateway/usage.py` reads an entry back, and
+`parse(fields)` in `tollgate_billing/events.py` reads and checks it as billing does.

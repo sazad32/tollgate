@@ -78,6 +78,13 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 - Usage events (ADR 0015, format in `docs/usage-events.md`): one per request a model ran, in the Redis
   stream `tollgate:usage`, key `<request id>:usage`, at least once (buffered in memory while Redis is
   down). Redis is a StatefulSet `redis-0` on node-2 with an append-only file on a local PV.
+- Billing (ADR 0016): Deployment `tollgate-billing` (image `ghcr.io/sazad32/tollgate-billing`, built by
+  `billing-image.yml`, pinned by digest in `deployment.yaml` and `migrate-job.yaml`). It reads the stream
+  as consumer group `billing`, and acknowledges after commit into `usage_ledger` (PK = idempotency key) in
+  its own database `billing` (login `billing`, Secret `billing-db`, made by `db-init-job.yaml`). Bad entries
+  go to `usage_rejects`. Billing rule: completed = all, client_disconnected = estimate, failed = 0. Trims
+  the stream only past 24 h and acknowledged by every group. Ledger SQL tests need a real Postgres
+  (`TOLLGATE_TEST_DATABASE_URL`; CI has one, locally see billing/README.md), else they skip.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -119,6 +126,9 @@ uv run python -m tollgate_bench job node-2 | kubectl apply -f -   # benchmark a 
 uv run python -m tollgate_bench report bench/raw/*.jsonl         # Markdown results table from Job logs
 uv run python -m tollgate_bench fairness --url ... --trickle-url ...  # two-tenant demo (bench/README.md)
 kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XLEN tollgate:usage'  # usage events
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status   # billing: group, ledger, per tenant
+kubectl apply -f deploy/billing/migrate-job.yaml   # billing's migrations, once per release (then delete the Job)
+docker run -d --rm --name tollgate-test-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:54329:5432 postgres:18.6-bookworm  # then TOLLGATE_TEST_DATABASE_URL (billing/README.md)
 ```
 (Add new commands here as they are created.)
 

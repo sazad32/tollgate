@@ -3,7 +3,13 @@ name = "tollgate-billing"
 version = "0.1.0"
 description = "Usage event consumer, ledger, pricing and invoices"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "pydantic-settings>=2.16.2",
+    "redis>=8.1.0",
+    "sqlalchemy[asyncio]>=2.1.8",
+]
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]

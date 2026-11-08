@@ -1,0 +1,49 @@
+# Apply billing's database migrations (ADR 0016), once per release, before the new consumer runs.
+# Not part of `kubectl apply -k deploy`. Run it by hand, with the same image as deployment.yaml:
+#   kubectl apply -f deploy/billing/migrate-job.yaml
+#   kubectl -n tollgate wait --for=condition=complete job/billing-migrate --timeout=2m
+#   kubectl -n tollgate logs job/billing-migrate
+#   kubectl -n tollgate delete job billing-migrate      # a Job's name can't be reused until deleted
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: billing-migrate
+  namespace: tollgate
+  labels:
+    app.kubernetes.io/name: billing-migrate
+    app.kubernetes.io/part-of: tollgate
+spec:
+  backoffLimit: 2 # Postgres may still be starting; a migration is idempotent, so a retry is safe
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # Keep in step with deploy/billing/deployment.yaml.
+          image: ghcr.io/sazad32/tollgate-billing:sha-e654403@sha256:bc38053b8731f3c788aa00ad70201f64f2e3c9ae90fb1a22ada17bb242580098
+          command: ["python", "-m", "tollgate_billing", "migrate"]
+          env:
+            - name: TOLLGATE_BILLING_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-db
+                  key: TOLLGATE_BILLING_DATABASE_URL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 96Mi
+            limits:
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

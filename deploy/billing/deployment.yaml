@@ -1,0 +1,77 @@
+# The billing consumer (ADR 0016): usage events from Redis into the ledger in Postgres. A worker, no
+# port. One replica is enough, and two would also be safe: the consumer group splits the events,
+# and the ledger's key skips any event both see.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tollgate-billing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tollgate-billing
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tollgate-billing
+        app.kubernetes.io/component: billing
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      # On SIGTERM the consumer stops after the current batch. A pod killed mid-batch is safe too:
+      # what it didn't acknowledge is taken over after a minute, and the ledger skips duplicates.
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: billing
+          # Built by .github/workflows/billing-image.yml from commit e654403. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-billing:sha-e654403@sha256:bc38053b8731f3c788aa00ad70201f64f2e3c9ae90fb1a22ada17bb242580098
+          envFrom:
+            - configMapRef:
+                name: tollgate-billing-config
+          env:
+            # postgresql+asyncpg://billing:<password>@postgres.tollgate.svc:5432/billing. Made by hand.
+            - name: TOLLGATE_BILLING_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-db
+                  key: TOLLGATE_BILLING_DATABASE_URL
+            # The gateway's Redis, where the usage stream lives (ADR 0015).
+            - name: TOLLGATE_BILLING_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: TOLLGATE_REDIS_URL
+          # A worker has no HTTP endpoint to probe. The loop touches /tmp/alive on every pass (at
+          # least every 5 s, or 30 s if Redis hangs), so a file older than a minute means it's stuck.
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'test -n "$(find /tmp/alive -mmin -1)"']
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Mi

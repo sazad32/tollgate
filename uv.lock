@@ -1220,6 +1220,22 @@ requires-dist = [{ name = "httpx", specifier = ">=0.28.1" }]
 name = "tollgate-billing"
 version = "0.1.0"
 source = { editable = "billing" }
+dependencies = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "pydantic-settings" },
+    { name = "redis" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.20.1" },
+    { name = "asyncpg", specifier = ">=0.32.0" },
+    { name = "pydantic-settings", specifier = ">=2.16.2" },
+    { name = "redis", specifier = ">=8.1.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.8" },
+]
 
 [[package]]
 name = "tollgate-gateway"

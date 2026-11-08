@@ -2,6 +2,15 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-08 — Week 11: billing consumer and usage ledger
+- Changed: billing reads `tollgate:usage` as the consumer group `billing` and writes each event
+  once to `usage_ledger`. The ledger is keyed by the idempotency key, and billing acknowledges only
+  after the commit. Bad entries are set aside. Hang-ups are billed at the estimate and failures at
+  0 (ADR 0016).
+- Broke: fakeredis answers blocking reads instantly, which starved the event loop in tests.
+- Measured: all 358 tests pass. On the cluster, a duplicate, a full replay and a 25 s Postgres
+  outage changed nothing: 13 keys in the stream, 13 rows in the ledger.
+
 ## 2026-11-08 — Week 10: usage events
 - Changed: every request a model ran ends in one usage event (idempotency key `<request id>:usage`,
   the model that answered, reported or estimated tokens, how it ended) in the Redis stream

@@ -9,10 +9,11 @@ deploy/
   namespace.yaml         the tollgate namespace
   storage/               tollgate-local StorageClass and the PVs: models, Prometheus, Postgres (ADR 0006)
   llama-server/          StatefulSet (one replica per GPU node), Services, settings (ADR 0004, 0005)
-  postgres/              Postgres 18: databases for the gateway and Keycloak (ADR 0011)
+  postgres/              Postgres 18: databases for the gateway, Keycloak and billing (ADR 0011)
   keycloak/              Keycloak 26 and the tollgate realm export (ADR 0003, 0010)
   redis/                 Redis 8: token buckets, fair queue, usage stream (ADR 0012, 0014, 0015)
   gateway/               the API gateway: Deployment (2 replicas), Service, settings, migration Job (0009, 0010)
+  billing/               the billing consumer: Deployment, settings, database and migration Jobs (ADR 0016)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
 ```
@@ -50,6 +51,12 @@ kubectl -n tollgate create secret generic gateway-auth @a
 $rp = New-Secret
 $a = @("--from-literal=REDIS_PASSWORD=$rp", "--from-literal=TOLLGATE_REDIS_URL=redis://:$rp@redis.tollgate.svc:6379/0")
 kubectl -n tollgate create secret generic redis-auth @a
+
+$bp = New-Secret
+$a = @("--from-literal=BILLING_DB_PASSWORD=$bp",
+       "--from-literal=TOLLGATE_BILLING_DATABASE_URL=postgresql+asyncpg://billing:$bp@postgres.tollgate.svc:5432/billing")
+kubectl -n tollgate create secret generic billing-db @a
+Remove-Variable pg, rp, bp, a
 ```
 Changing the pepper later invalidates every API key (their hashes no longer match).
 Grafana's admin login, as a Secret that never goes in Git (PowerShell):
@@ -79,6 +86,18 @@ kubectl apply -f deploy/gateway/migrate-job.yaml
 kubectl -n tollgate wait --for=condition=complete job/gateway-migrate --timeout=2m
 kubectl -n tollgate delete job gateway-migrate
 ```
+Billing's database and login are created by a Job, once (and again after changing the
+`billing-db` Secret, to set the new password). Then come billing's migrations, once per release:
+```
+kubectl apply -f deploy/billing/db-init-job.yaml
+kubectl -n tollgate wait --for=condition=complete job/billing-db-init --timeout=2m
+kubectl -n tollgate delete job billing-db-init
+kubectl apply -f deploy/billing/migrate-job.yaml
+kubectl -n tollgate wait --for=condition=complete job/billing-migrate --timeout=2m
+kubectl -n tollgate delete job billing-migrate
+```
+Until then billing logs `billing paused, will retry every 5 s` and loses nothing: events wait in the
+stream.
 
 ## The gateway
 The OpenAI-compatible entry point (ADR 0009), inside the cluster at
@@ -181,6 +200,26 @@ kubectl -n tollgate logs deploy/tollgate-gateway | Select-String "usage event"
 **Upgrading from before week 10:** Redis was a Deployment. Delete it before applying, so two Redis
 instances never serve at once: `kubectl -n tollgate delete deploy redis`, then `kubectl apply -k deploy`.
 
+## Billing
+A worker with no port (ADR 0016). It reads `tollgate:usage` as the consumer group `billing` and
+writes each event once to the usage ledger, in its own database `billing`. It acknowledges a batch
+only after the commit, and the ledger is keyed by the event's idempotency key, so copies and replays
+are skipped. If billing, Postgres or Redis is down, events wait in the stream and the API carries on.
+```powershell
+kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing status   # stream, group, ledger, per tenant
+kubectl -n tollgate logs deploy/tollgate-billing -f                                     # "billed N usage events (...)"
+# the ledger itself
+kubectl -n tollgate exec postgres-0 -- psql -U postgres -d billing -c "SELECT tenant_id, status, billable_input_tokens, billable_output_tokens FROM usage_ledger ORDER BY started_at DESC LIMIT 10"
+# entries billing refused, with the reason
+kubectl -n tollgate exec postgres-0 -- psql -U postgres -d billing -c "SELECT stream_id, reason FROM usage_rejects"
+# re-read the whole stream (safe: every copy is skipped)
+kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XGROUP SETID tollgate:usage billing 0'
+```
+- **Shipping a code change:** as for the gateway, with the *Billing image* workflow, and the new
+  image in `billing/deployment.yaml` and `billing/migrate-job.yaml`.
+- **The stream is trimmed** by billing, once a minute: only entries every group has acknowledged and
+  that are older than 24 hours (`TOLLGATE_BILLING_RETENTION_S` in `billing/billing.env`).
+
 ## Look at the dashboards
 ```powershell
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
@@ -220,8 +259,7 @@ Keep the alias and context in step with `workstation/vllm/compose.yaml`.
   around it within a second, and logs `backend vllm is down` / `is back`.
 
 ## Later phases
-- **Phases 2–3:** Redis, Postgres (reusing `tollgate-local` with its own PV on node-2), Keycloak (with a
-  realm export), the gateway and the billing consumer.
+- **Phase 3:** pricing and invoices (weeks 12–13).
 - **Phase 6:** one Helm chart for a one-command deploy.
 
 Secrets never go in this folder. Create Kubernetes Secrets outside git (`.gitignore` blocks `**/secrets/`).
