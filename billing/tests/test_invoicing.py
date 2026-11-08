@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from tollgate_billing.invoicing import Line, ModelUsage, describe, draft_invoice
+from tollgate_billing.invoicing import Line, ModelUsage, describe, draft_invoice, rate_text
 from tollgate_billing.months import Month
 from tollgate_billing.prices import parse_prices
 
@@ -150,3 +150,12 @@ def test_describe_shows_lines_bands_and_the_total() -> None:
     assert "up to 10,000,000" in text
     assert "over 10,000,000" in text
     assert "total USD 6.39 for 9 requests (2,600,000 in, 12,050,000 out)" in text
+
+
+@pytest.mark.parametrize(
+    ("rate", "shown"),
+    [("20.00", "20.00"), ("22", "22.00"), ("0.100000", "0.10"), ("0.4", "0.40"),
+     ("0.000001", "0.000001"), ("4.125", "4.125")],
+)  # fmt: skip
+def test_rates_show_at_least_cents_and_never_in_scientific_notation(rate, shown) -> None:
+    assert rate_text(D(rate)) == shown

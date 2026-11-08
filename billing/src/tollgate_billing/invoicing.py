@@ -83,6 +83,13 @@ def draft_invoice(tenant_id: str, month: Month, usage: Iterable[ModelUsage],
     )
 
 
+def rate_text(per_million: Decimal) -> str:
+    """A rate with at least two decimals: "0.10", "22.00", "0.000001". (Decimal.normalize alone
+    would print 20.00 as "2E+1".)"""
+    whole, _, fraction = f"{per_million.normalize():f}".partition(".")
+    return f"{whole}.{fraction.ljust(2, '0')}"
+
+
 def band_label(band_from: int, band_up_to: int | None) -> str:
     if band_up_to is None:
         return "all" if band_from == 0 else f"over {band_from:,}"
@@ -101,7 +108,7 @@ def describe(draft: Draft, finalized_at: datetime | None = None) -> list[str]:
             out.append(
                 f"  {line.model:<18}{line.meter:<8}"
                 f"{band_label(line.band_from, line.band_up_to):<24}{line.tokens:>14,}"
-                f"{line.per_million.normalize():>12}{line.amount:>12}"
+                f"{rate_text(line.per_million):>12}{line.amount:>12}"
             )
     for model in draft.unpriced:
         out.append(f"  {model}: no price for {draft.month}; add one to prices.toml")
