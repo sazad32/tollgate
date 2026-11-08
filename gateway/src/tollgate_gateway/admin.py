@@ -25,9 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tollgate_gateway.config import Settings
 from tollgate_gateway.db import ApiKeyRow, TenantRow, make_engine
 from tollgate_gateway.keys import display_prefix, generate_key, hash_key
+from tollgate_gateway.tenants import DATA_POLICIES
 
 TENANT_ID = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
-DATA_POLICIES = ("local_only", "hosted_allowed")
 
 
 def database_url(settings: Settings) -> str:

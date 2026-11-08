@@ -99,11 +99,13 @@ async def test_bad_requests_get_an_openai_style_400(
     assert upstream.requests == []  # never forwarded
 
 
-async def test_list_models_is_proxied(client: httpx.AsyncClient) -> None:
+async def test_list_models_comes_from_config(client: httpx.AsyncClient, upstream) -> None:
+    # The gateway knows its models; it doesn't ask a backend that may be down (ADR 0013).
     response = await client.get("/v1/models")
 
     assert response.status_code == 200
     assert response.json()["data"][0]["id"] == "smollm3-3b"
+    assert upstream.requests == []
 
 
 async def test_health_endpoints(client: httpx.AsyncClient) -> None:

@@ -22,7 +22,7 @@
 - [x] Week 5: FastAPI skeleton, OpenAI-compatible `/v1/chat/completions`, streaming end to end to vLLM (ADR 0009)
 - [x] Week 6: Hashed API keys per tenant; Keycloak in cluster; JWT validation (ADR 0010, 0011)
 - [x] Week 7: Token-based rate limits in Redis: reserve an estimate up front, settle when the stream ends (ADR 0012)
-- [ ] Week 8: Router: local by default, hosted for overflow or flagged requests; per-tenant data policy
+- [x] Week 8: Router: local by default, hosted for overflow or flagged requests; per-tenant data policy
 - [ ] Week 9: Per-tenant queues, fair scheduling, 429 with retry hints; two-tenant demo
 
 **Gate:** two tenants share one API with separate limits.

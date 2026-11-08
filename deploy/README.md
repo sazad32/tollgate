@@ -86,15 +86,28 @@ The OpenAI-compatible entry point (ADR 0009), inside the cluster at
 kubectl -n tollgate port-forward svc/tollgate-gateway 8000:8000
 curl.exe -s http://localhost:8000/v1/models
 ```
-- **Where it forwards:** `TOLLGATE_UPSTREAM_URL` in `gateway/gateway.env` (the llama-server Service by
-  default). Change it and re-apply; the pods roll.
-- **Trying another upstream without editing Git:**
-  `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_UPSTREAM_URL=http://vllm-workstation.tollgate.svc:8000`,
-  then remove the override with `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_UPSTREAM_URL-`.
-  An explicit env var wins over the ConfigMap.
+- **Where it routes (ADR 0013):** to the backends in `TOLLGATE_BACKENDS` (`gateway/gateway.env`): vLLM on
+  the workstation first while it has a free slot, else the llama-server pod with the most room. The
+  gateway reads each backend's `/metrics` every second; `x-tollgate-backend` on every response says who
+  answered. Watch the decisions with `kubectl -n tollgate logs deploy/tollgate-gateway -f`.
 - **Shipping a code change:** push the branch, wait for the *Gateway image* workflow, then put the new
   `sha-<commit>@sha256:<digest>` in `gateway/deployment.yaml` and `gateway/migrate-job.yaml`, run the
   migration Job if the schema changed, and re-apply.
+
+### The hosted model
+Claude, for `hosted_allowed` tenants only (ADR 0013): when a request asks for `claude-opus-5-5` by name, or
+when every local backend is full. It needs an Anthropic API key (console.anthropic.com, prepaid credits;
+keep auto-reload off as a spend cap), stored as a Secret. Run this in your own PowerShell window, so the
+key never lands in a log or transcript, then restart the gateway:
+```powershell
+$s = Read-Host "Anthropic API key" -AsSecureString
+$k = [Net.NetworkCredential]::new("", $s).Password
+kubectl -n tollgate create secret generic anthropic-api-key --from-literal=ANTHROPIC_API_KEY=$k
+Remove-Variable s, k
+kubectl -n tollgate rollout restart deploy/tollgate-gateway
+```
+Without the Secret there is no hosted model: every request stays local. A tenant's data policy is set
+when it's created (`tenant create <id> --data-policy hosted_allowed`); the default is `local_only`.
 
 ### Tenants and API keys
 Every `/v1` call needs `Authorization: Bearer <API key or Keycloak token>` (ADR 0010). Manage tenants and
@@ -175,7 +188,8 @@ Keep the alias and context in step with `workstation/vllm/compose.yaml`.
 
 - **Dashboards are generated JSON.** Edit `monitoring/dashboards/*.json` (or export from Grafana's UI)
   and re-apply. Changes made only in the UI are lost when Grafana restarts: it has no storage.
-- **vLLM shows Down when the workstation is off.** That's expected, not an outage.
+- **vLLM shows Down when the workstation is off.** That's expected, not an outage: the gateway routes
+  around it within a second, and logs `backend vllm is down` / `is back`.
 
 ## Later phases
 - **Phases 2–3:** Redis, Postgres (reusing `tollgate-local` with its own PV on node-2), Keycloak (with a

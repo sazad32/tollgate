@@ -7,16 +7,25 @@ Gotcha: values are read when Settings() is created, not on every access; restart
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tollgate_gateway.backends import Backend
 from tollgate_gateway.limits import Limit
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TOLLGATE_")
 
-    # --- Upstream model server (ADR 0009) ---------------------------------------------------------
-    # The one model server this gateway forwards to. The week 8 router replaces this with several.
-    upstream_url: str = "http://llama-server.tollgate.svc:8080"
-    # Sent upstream as a bearer token when set (vLLM needs one; llama-server ignores it).
+    # --- Local model servers (ADR 0009, 0013) -----------------------------------------------------
+    # The backends the router chooses from, as JSON in TOLLGATE_BACKENDS. The default is the
+    # llama-server Service, for running the gateway outside the cluster's config.
+    backends: list[Backend] = [
+        Backend(name="llama-server", url="http://llama-server.tollgate.svc:8080", slots=4)
+    ]
+    # The model every local backend serves (ADR 0005). Any model name other than hosted_model goes
+    # to a local backend.
+    local_model: str = "smollm3-3b"
+    # How often to read each backend's /metrics. 0 turns polling off (tests poll by hand).
+    load_poll_interval_s: float = 1.0
+    # Sent to local backends as a bearer token when set (vLLM needs one; llama-server ignores it).
     upstream_api_key: SecretStr | None = None
     # A request queued on a busy llama-server can wait minutes for a first byte (bench/RESULTS.md).
     upstream_read_timeout_s: float = 900.0
@@ -25,6 +34,20 @@ class Settings(BaseSettings):
     # (the week 4 benchmark lost 6 requests to exactly that race).
     upstream_keepalive_expiry_s: float = 2.0
     upstream_max_connections: int = 200
+
+    # --- Hosted model (ADR 0013) ------------------------------------------------------------------
+    # Unset: no hosted model at all; every request stays local.
+    anthropic_api_key: SecretStr | None = None
+    # Clients ask for it by this name, and hosted_allowed tenants overflow to it.
+    hosted_model: str = "claude-opus-5-5"
+    # How hard Claude thinks before answering (low, medium, high...). Empty: the model's default.
+    hosted_effort: str | None = "low"
+    # Claude needs a max_tokens; used when the client sent none. Thinking counts towards it.
+    hosted_max_tokens: int = 4096
+    # Anthropic's server-side refusal fallback: a declined request is retried on another model.
+    hosted_refusal_fallback: bool = True
+    hosted_timeout_s: float = 600.0
+    hosted_max_retries: int = 2  # the SDK's retries, before the first byte only
 
     # --- Authentication (ADR 0010) ----------------------------------------------------------------
     # Secret key for hashing API keys. Required: the gateway refuses to start without it.

@@ -146,7 +146,8 @@ async def test_redis_down_means_no_limits_not_no_service(
     server.connected = False
     app = create_app(
         Settings(
-            upstream_url="http://upstream",
+            backends=[{"name": "node-1", "url": "http://upstream"}],
+            load_poll_interval_s=0,
             api_key_pepper="test-pepper",
             rate_limits={"standard": 10},
         ),

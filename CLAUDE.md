@@ -61,12 +61,17 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
 - Gateway (ADR 0009): image `ghcr.io/sazad32/tollgate-gateway:sha-<commit>`, built by
   `.github/workflows/gateway-image.yml` on `main` and `feat/**`; deploy pins it by digest (in both
   `deployment.yaml` and `migrate-job.yaml`).
-- Auth (ADR 0010): every `/v1` call needs a tenant API key (`tg_…`) or a Keycloak token. Tenants `support`
-  and `billing` exist. Postgres 18 (`postgres-0`, node-2) holds tenants and keys (ADR 0011); Keycloak 26
-  issues tokens (realm `tollgate`). Secrets `postgres-credentials`, `keycloak-admin`, `keycloak-clients`,
-  `gateway-auth` are hand-made (see deploy/README.md); creating Secrets is the user's step, not Claude's.
+- Auth (ADR 0010): every `/v1` call needs a tenant API key (`tg_…`) or a Keycloak token. Tenants: `support`
+  and `billing` (local_only), `engineering` (hosted_allowed). Postgres 18 (`postgres-0`, node-2) holds
+  tenants and keys (ADR 0011); Keycloak 26 issues tokens (realm `tollgate`). Secrets `postgres-credentials`,
+  `keycloak-admin`, `keycloak-clients`, `gateway-auth`, `anthropic-api-key` are hand-made (see
+  deploy/README.md); creating Secrets is the user's step, not Claude's.
 - Rate limits (ADR 0012): token bucket per tenant in Redis (`deploy/redis`, Secret `redis-auth`), reserve an
   estimate, settle with real usage; tiers in `TOLLGATE_RATE_LIMITS`. Redis down = no limits (fail open).
+- Routing (ADR 0013): backends in `TOLLGATE_BACKENDS` (vLLM priority 0, each llama-server pod via the
+  headless Service), load polled from their /metrics every second. Hosted model `claude-opus-5-5` via the
+  `anthropic` SDK, only for `hosted_allowed` tenants; off without the `anthropic-api-key` Secret.
+  Responses carry `x-tollgate-backend`.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.

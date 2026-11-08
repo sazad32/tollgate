@@ -1,9 +1,10 @@
-"""Shared test setup: the gateway in front of a fake model server, a fake tenant database and a fake
-Keycloak. No network, no real model, no real database.
+"""Shared test setup: the gateway in front of fake model servers, a fake Anthropic API, a fake
+tenant database and a fake Keycloak. No network, no real model, no real database.
 
 .NET: like WebApplicationFactory<Program> with the HttpClient handler and stores swapped for fakes.
 """
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Callable
@@ -11,6 +12,7 @@ from datetime import UTC, datetime
 
 import fakeredis
 import httpx
+import httpx2
 import jwt
 import pytest
 import pytest_asyncio
@@ -43,11 +45,22 @@ JWKS_URL = f"{ISSUER}/protocol/openid-connect/certs"
 
 
 class FakeUpstream:
-    """A model server that answers from a script: each entry is a Response or an exception."""
+    """The model servers (one per host name), answering from a script: each entry is a Response or
+    an exception. /metrics polls are answered from `busy` and kept out of `requests`."""
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.script: list[httpx.Response | Exception] = []
+        self.busy: dict[str, int] = {}  # host -> requests running there; missing = idle
+        self.down: set[str] = set()  # hosts that refuse connections
+        self.delay = 0.0  # seconds before answering a chat request, like a model reading the prompt
+
+    def metrics(self, host: str) -> httpx.Response:
+        if host in self.down:
+            raise httpx.ConnectError("connection refused")
+        busy = self.busy.get(host, 0)
+        text = f"llamacpp:requests_processing {busy}\nvllm:num_requests_running {busy}\n"
+        return httpx.Response(200, text=text)
 
     def default(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -59,7 +72,13 @@ class FakeUpstream:
         return httpx.Response(200, json=COMPLETION)
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return self.metrics(request.url.host)
         self.requests.append(request)
+        if request.url.host in self.down:
+            raise httpx.ConnectError("connection refused")
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.script:
             step = self.script.pop(0)
             if isinstance(step, Exception):
@@ -77,6 +96,103 @@ def upstream() -> FakeUpstream:
     return FakeUpstream()
 
 
+# --- fake Anthropic API --------------------------------------------------------------------------
+
+CLAUDE = "claude-opus-5-5"
+
+
+class FakeAnthropic:
+    """Anthropic's Messages API: a reply "Hello" for 12 prompt and 7 output tokens, plain or
+    streamed, unless the script says otherwise. Speaks httpx2, the anthropic SDK's HTTP library."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx2.Request] = []
+        self.script: list[httpx2.Response | Exception] = []
+        self.iterations: list[dict] | None = None  # per-attempt usage, as after a refusal fallback
+        self.break_stream = False  # drop the connection after the first text delta
+
+    def usage(self) -> dict:
+        usage: dict = {"input_tokens": 12, "output_tokens": 7}
+        if self.iterations:
+            usage["iterations"] = self.iterations
+        return usage
+
+    def message(self) -> dict:
+        return {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": CLAUDE,
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "sig"},  # omitted by default
+                {"type": "text", "text": "Hello"},
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": self.usage(),
+        }
+
+    def events(self) -> list[dict]:
+        start = {**self.message(), "content": [], "stop_reason": None}
+        start["usage"] = {"input_tokens": 12, "output_tokens": 1}
+        delta_usage: dict = {"output_tokens": 7}
+        if self.iterations:
+            delta_usage["iterations"] = self.iterations
+        thinking = {"type": "thinking", "thinking": "", "signature": ""}
+        return [
+            {"type": "message_start", "message": start},
+            {"type": "content_block_start", "index": 0, "content_block": thinking},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "signature_delta", "signature": "sig"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "Hel"}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "lo"}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+             "usage": delta_usage},
+            {"type": "message_stop"},
+        ]  # fmt: skip
+
+    def sse(self) -> httpx2.Response:
+        frames = [f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in self.events()]
+        if not self.break_stream:
+            return httpx2.Response(
+                200, content=b"".join(frames), headers={"content-type": "text/event-stream"}
+            )
+
+        class Broken(httpx2.AsyncByteStream):
+            async def __aiter__(self):
+                for frame in frames[:6]:  # up to and including the first text delta
+                    yield frame
+                raise httpx2.ReadError("connection reset")
+
+        return httpx2.Response(200, stream=Broken(), headers={"content-type": "text/event-stream"})
+
+    async def handle(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        if self.script:
+            step = self.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+        if json.loads(request.content).get("stream"):
+            return self.sse()
+        return httpx2.Response(200, json=self.message())
+
+    @property
+    def last_body(self) -> dict:
+        return json.loads(self.requests[-1].content)
+
+
+@pytest.fixture
+def claude() -> FakeAnthropic:
+    return FakeAnthropic()
+
+
 # --- fake tenant database ------------------------------------------------------------------------
 
 
@@ -86,12 +202,21 @@ def support_key() -> str:
 
 
 @pytest.fixture
-def auth_store(support_key: str) -> InMemoryAuthStore:
-    """Two tenants (one disabled), three keys: support's, a revoked one, the disabled tenant's."""
+def engineering_key() -> str:
+    return generate_key()
+
+
+@pytest.fixture
+def auth_store(support_key: str, engineering_key: str) -> InMemoryAuthStore:
+    """Four tenants: support and billing (local_only, the default), engineering (hosted_allowed) and
+    a disabled one. Keys: support's, engineering's, a revoked one, the disabled tenant's."""
     store = InMemoryAuthStore()
     store.tenants = {
         "support": Tenant(id="support", name="Support team"),
         "billing": Tenant(id="billing", name="Billing team"),
+        "engineering": Tenant(
+            id="engineering", name="Engineering team", data_policy="hosted_allowed"
+        ),
         "legacy": Tenant(id="legacy", name="Retired team", disabled=True),
     }
 
@@ -105,6 +230,7 @@ def auth_store(support_key: str) -> InMemoryAuthStore:
         )
 
     add(support_key, "support", "key-support")
+    add(engineering_key, "engineering", "key-engineering")
     add("tg_revokedrevokedrevokedrevokedrevokedrevok", "support", "key-revoked", revoked=True)
     add("tg_legacylegacylegacylegacylegacylegacylega", "legacy", "key-legacy")
     return store
@@ -205,16 +331,22 @@ def clock() -> Clock:
     return Clock()
 
 
+ONE_BACKEND = [{"name": "node-1", "url": "http://upstream", "kind": "llama", "slots": 2}]
+
+
 @pytest.fixture
 def make_gateway(
     upstream: FakeUpstream,
+    claude: FakeAnthropic,
     auth_store: InMemoryAuthStore,
     keycloak: FakeKeycloak,
     redis: fakeredis.FakeAsyncRedis,
     clock: Clock,
 ):
     def build(**settings: object):
-        settings.setdefault("upstream_url", "http://upstream")
+        settings.setdefault("backends", ONE_BACKEND)
+        settings.setdefault("load_poll_interval_s", 0)  # tests poll by hand: app.state.loads
+        settings.setdefault("anthropic_api_key", "test-anthropic-key")
         settings.setdefault("api_key_pepper", PEPPER.decode())
         settings.setdefault("oidc_issuer", ISSUER)
         settings.setdefault("oidc_audience", AUDIENCE)
@@ -222,6 +354,7 @@ def make_gateway(
         return create_app(
             Settings(**settings),
             upstream_transport=httpx.MockTransport(upstream.handle),
+            hosted_transport=httpx2.MockTransport(claude.handle),
             auth_store=auth_store,
             jwks_transport=httpx.MockTransport(keycloak.handle),
             redis_client=redis,

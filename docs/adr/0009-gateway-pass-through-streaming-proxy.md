@@ -36,7 +36,8 @@ time on clients that have gone away.
   Upstream keep-alive expires at 2 s, under llama-server's 5 s.
 - **A server-made request ID** (`X-Request-ID`) on every request, returned and sent upstream. Clients
   can't choose it, because week 10's billing idempotency keys build on it.
-- **One configured upstream** (`TOLLGATE_UPSTREAM_URL`), the llama-server Service by default.
+- **One configured upstream** (`TOLLGATE_UPSTREAM_URL`), the llama-server Service by default. (Replaced
+  by the router in week 8: ADR 0013.)
 - **CI-built image, pinned by digest.** A two-stage uv build, run as 10001:10001 with a read-only root
   filesystem; GitHub Actions pushes `ghcr.io/sazad32/tollgate-gateway:sha-<commit>` on `main` and
   `feat/**`. The package is public, like the repo, so k3s pulls it without credentials.
