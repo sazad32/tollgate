@@ -27,8 +27,8 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | llama-server | k3s StatefulSet, 1 pod per GPU node (ADR 0004, 0006) | Model weights on a local PV per node |
 | vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights in a Docker volume |
 | Redis | k3s StatefulSet | Rate-limit counters, queues, usage stream |
-| Postgres | k3s StatefulSet on node-2 storage | Ledger, pricing, invoices, tenants |
-| Keycloak | k3s Deployment | Its own Postgres schema |
+| Postgres | k3s StatefulSet on node-2 storage (ADR 0011) | Tenants and API keys now; ledger, pricing, invoices in Phase 3 |
+| Keycloak | k3s Deployment, realm `tollgate` (ADR 0010) | Its own database in the same Postgres |
 | Prometheus + Grafana | k3s `monitoring` namespace, kube-prometheus-stack (ADR 0007) | Metrics on a local PV on node-2 |
 | DCGM exporter | k3s DaemonSet on GPU nodes (ADR 0007) | Stateless |
 | Dashboard | Phase 5 | Reads billing API |
@@ -40,8 +40,8 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 - Tokens are billed on what the model generated, with partial streams recorded explicitly (see ADR when written).
 
 ## Data model (initial sketch — refine in Phase 3 ADRs)
-- `tenants(id, name, data_policy, tier)`
-- `api_keys(id, tenant_id, key_hash, created_at, revoked_at)`
+- `tenants(id, name, data_policy, tier, disabled, created_at)` (built in week 6)
+- `api_keys(id, tenant_id, name, prefix, key_hash, created_at, last_used_at, revoked_at)` (built in week 6)
 - `usage_events(idempotency_key PK, tenant_id, request_id, model, input_tokens, output_tokens, status, occurred_at)`
 - `prices(model, tier, input_per_1k, output_per_1k, effective_from)`
 - `invoices(id, tenant_id, period, total, status)` + `invoice_lines`
