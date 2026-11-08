@@ -17,6 +17,7 @@ bench/
     job.py        the Kubernetes Job for a target
     gpu.py        GPU temperature and clock per level, from Prometheus
     report.py     Job logs -> the Markdown table
+    fairness.py   two tenants through the gateway: a burst and a trickle (week 9)
   tests/          no network needed: a fake streaming server (httpx.MockTransport)
   raw/            Job logs, one JSON object per line (gitignored)
 ```
@@ -44,6 +45,22 @@ The `vllm` target needs vLLM running on the workstation and its API key in the c
 `kubectl -n tollgate create secret generic vllm-api-key --from-env-file=deploy/workstation/vllm/.env`.
 
 The Grafana dashboards (*Tollgate / Model servers*, *Tollgate / GPUs*) show each run live.
+
+## Two-tenant fairness demo
+`fairness` runs from the workstation against the gateway: one tenant sends a burst, the other a
+request every few seconds, and the table shows how long each waited (ADR 0014; results at the end of
+RESULTS.md). It needs an API key for each tenant (`admin key create`; revoke them afterwards) and a
+port-forward to each gateway pod, so the burst and the trickle use different replicas:
+```powershell
+kubectl -n tollgate get pods -l app.kubernetes.io/name=tollgate-gateway
+kubectl -n tollgate port-forward pod/<first pod> 8001:8000    # and pod/<second pod> 8002:8000
+$env:TG_FLOOD = "<support key>"; $env:TG_TRICKLE = "<billing key>"
+uv run python -m tollgate_bench fairness --url http://localhost:8001 --trickle-url http://localhost:8002 `
+  --label "fair queue on" --flood-key-env TG_FLOOD --trickle-key-env TG_TRICKLE > bench/raw/fairness-on.jsonl
+uv run python -m tollgate_bench report bench/raw/fairness-*.jsonl
+```
+For the "off" run: `kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_FAIR_QUEUE=false`, then
+remove it again with `TOLLGATE_FAIR_QUEUE-`. Wait a minute between runs, so token buckets refill.
 
 ## Later
 - **Phase 4:** run the same client through the gateway and record the overhead, before and after tuning.

@@ -1,4 +1,4 @@
-"""Command line: `python -m tollgate_bench run|job|report ...` (see bench/README.md)."""
+"""Command line: `python -m tollgate_bench run|job|report|fairness ...` (see bench/README.md)."""
 
 import argparse
 import asyncio
@@ -11,6 +11,7 @@ from dataclasses import asdict
 import httpx
 
 from tollgate_bench.client import run_level
+from tollgate_bench.fairness import fairness_table, run_fairness, summarize_fairness
 from tollgate_bench.gpu import gpu_window
 from tollgate_bench.job import manifest
 from tollgate_bench.report import markdown_table, read_records
@@ -67,6 +68,24 @@ async def run(args: argparse.Namespace) -> None:
     emit({"type": "done", "backend": args.backend, "finished_at": time.time()})
 
 
+async def fairness(args: argparse.Namespace) -> None:
+    flood_key, trickle_key = os.environ[args.flood_key_env], os.environ[args.trickle_key_env]
+    log(f"{args.label}: a burst of {args.flood}, then {args.trickle} more every "
+        f"{args.trickle_every:.0f} s from the other tenant")  # fmt: skip
+    results = await run_fairness(
+        args.url, args.model, flood_key, trickle_key, run_id=args.run_id, flood=args.flood,
+        trickle=args.trickle, trickle_start_s=args.trickle_start,
+        trickle_every_s=args.trickle_every, max_tokens=args.max_tokens,
+        trickle_url=args.trickle_url,
+    )  # fmt: skip
+    for role, result in results:
+        emit({"type": "fairness_request", "label": args.label, "tenant": role, **asdict(result)})
+    summaries = summarize_fairness(args.label, results)
+    for summary in summaries:
+        emit(summary)
+    log("summary:\n" + fairness_table(summaries))
+
+
 def main(argv: list[str] | None = None) -> None:
     # Windows writes redirected output in its legacy code page, which garbles "°C" in RESULTS.md.
     sys.stdout.reconfigure(encoding="utf-8")
@@ -94,9 +113,25 @@ def main(argv: list[str] | None = None) -> None:
     p_report = commands.add_parser("report", help="Markdown results table from Job logs")
     p_report.add_argument("files", nargs="+")
 
+    p_fair = commands.add_parser("fairness", help="two-tenant fairness demo against the gateway")
+    p_fair.add_argument("--url", required=True, help="gateway base URL, without /v1")
+    p_fair.add_argument("--trickle-url", help="another replica for the trickle (default: --url)")
+    p_fair.add_argument("--model", default="smollm3-3b")
+    p_fair.add_argument("--label", required=True, help="name of this run in the table")
+    p_fair.add_argument("--flood-key-env", required=True, help="env var with the burst's API key")
+    p_fair.add_argument("--trickle-key-env", required=True, help="env var: the other tenant's key")
+    p_fair.add_argument("--flood", type=int, default=12, help="requests in the burst")
+    p_fair.add_argument("--trickle", type=int, default=5, help="requests from the other tenant")
+    p_fair.add_argument("--trickle-start", type=float, default=2.0, help="seconds after the burst")
+    p_fair.add_argument("--trickle-every", type=float, default=5.0, help="seconds between them")
+    p_fair.add_argument("--max-tokens", type=int, default=128)
+    p_fair.add_argument("--run-id", default=time.strftime("%Y%m%d-%H%M%S"))
+
     args = parser.parse_args(argv)
     if args.command == "run":
         asyncio.run(run(args))
+    elif args.command == "fairness":
+        asyncio.run(fairness(args))
     elif args.command == "job":
         levels = tuple(int(x) for x in args.levels.split(",")) if args.levels else None
         counts = tuple(int(x) for x in args.requests.split(",")) if args.requests else None
@@ -108,6 +143,7 @@ def main(argv: list[str] | None = None) -> None:
             with open(name, encoding="utf-8") as f:
                 records += read_records(f)
         print(markdown_table(records))
+        print(fairness_table(records))
 
 
 if __name__ == "__main__":

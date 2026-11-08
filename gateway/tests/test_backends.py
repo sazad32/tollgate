@@ -174,3 +174,13 @@ async def test_a_slow_backend_does_not_delay_the_others(servers) -> None:
             await task
 
     assert servers.paths.count("/metrics") > 5  # node-1 polled again and again meanwhile
+
+
+async def test_capacity_is_the_slots_of_the_backends_that_are_up(tracker, servers) -> None:
+    assert tracker.capacity() == 32 + 2
+
+    del servers.answers["vllm"]
+    await tracker.poll_once()
+
+    assert tracker.capacity() == 2
+    assert tracker.available() == [("node-1", 2, 1)]

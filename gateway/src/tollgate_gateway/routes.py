@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from tollgate_gateway.admission import Admission, Ticket, queue_refused
 from tollgate_gateway.auth import Principal, require_principal
 from tollgate_gateway.backends import LoadTracker
 from tollgate_gateway.errors import openai_error, sse_error_event, upstream_failure
@@ -33,7 +34,7 @@ from tollgate_gateway.ratelimit import (
     usage_from_body,
     usage_total,
 )
-from tollgate_gateway.router import Route, choose_route
+from tollgate_gateway.router import Route, choose_route, local_order
 from tollgate_gateway.upstream import open_local
 
 log = logging.getLogger("tollgate.gateway")
@@ -136,7 +137,36 @@ async def chat_completions(request: Request) -> Response:
         return await forward_hosted(
             hosted, principal, payload, chat, request_id, reservation, headers
         )
-    return await forward_local(request, route, payload, chat, reservation, headers)
+
+    # 4. Local: wait for a fair turn at a slot (ADR 0014). The queue says which backend the slot
+    # is on; the others stay in the order as failover.
+    ticket: Ticket | None = None
+    admission: Admission | None = request.app.state.admission
+    if admission is not None:
+        outcome = await admission.wait_for_slot(
+            tenant.id, request_id, loads.available, request.is_disconnected
+        )
+        if not isinstance(outcome, Ticket):
+            if reservation:
+                await reservation.settle(0)  # nothing was generated: full refund
+            if outcome is None:
+                return Response(status_code=499)  # the client hung up; nobody reads this
+            response = queue_refused(outcome)
+            response.headers.update(headers)
+            return response
+        ticket = outcome
+        order = local_order(loads.snapshot()) or route.backends
+        if ticket.backend:
+            order = (ticket.backend, *(name for name in order if name != ticket.backend))
+        route = Route("local", route.reason, order)
+    try:
+        return await forward_local(request, route, payload, chat, reservation, headers, ticket)
+    except BaseException:
+        # A safety net: forward_local releases the slot on every path it knows about.
+        if ticket is not None:
+            with anyio.CancelScope(shield=True):
+                await ticket.release()
+        raise
 
 
 async def forward_local(
@@ -146,8 +176,14 @@ async def forward_local(
     chat: ChatCompletionRequest,
     reservation: Reservation | None,
     headers: dict[str, str],
+    ticket: Ticket | None = None,
 ) -> Response:
     request_id: str = request.state.request_id
+
+    async def release() -> None:
+        if ticket is not None:
+            await ticket.release()
+
     # For streams, always ask the model server for its usage report, to settle with real counts.
     upstream_body, keep_usage = payload, True
     if chat.stream:
@@ -166,6 +202,7 @@ async def forward_local(
         )
     except httpx.HTTPError as exc:
         log.warning("request %s: no local backend answered: %r", request_id, exc)
+        await release()
         if reservation:
             await reservation.settle(0)  # nothing was generated: full refund
         return upstream_failure(exc)
@@ -175,17 +212,27 @@ async def forward_local(
 
     # Plain replies and errors settle right away, streams when they end (in relay()).
     if upstream.status_code != 200 or not chat.stream:
-        response = await buffered(upstream)
+        try:
+            response = await buffered(upstream)
+        finally:
+            await release()
         if reservation:
             ok = 200 <= response.status_code < 300
             used = usage_from_body(response.body) if ok else 0
             await reservation.settle(reservation.reserved if used is None else used)
         response.headers.update(headers)
         return response
+
+    async def close() -> None:
+        try:
+            await upstream.aclose()
+        finally:
+            await release()  # the slot goes back when the stream ends, however it ends
+
     return StreamingResponse(
         relay(
             upstream.aiter_bytes(),
-            upstream.aclose,
+            close,
             request_id,
             StreamMeter(keep_usage),
             reservation,

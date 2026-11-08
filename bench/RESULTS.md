@@ -2,6 +2,7 @@
 
 Model servers measured on their own, without the gateway, on 2026-11-07 (run `w4-20261107-1249`).
 Method: [ADR 0008](../docs/adr/0008-benchmark-method.md). How to re-run: [README](README.md).
+Two tenants sharing the GPUs through the gateway (week 9): [at the end](#two-tenants-one-set-of-gpus-week-9-phase-2-gate).
 
 ## Headline
 Same model (SmolLM3-3B, 4-bit), same requests (281 prompt tokens, 128 output tokens), closed loop.
@@ -119,3 +120,47 @@ a connection closes before any response byte arrives.
 | 8 | 32 / 32 | 613.2 | 4.79 | 454 ms | 477 ms | 9 ms | 12 ms | – | – |
 | 32 | 64 / 64 | 1087.6 | 8.50 | 1.1 s | 1.8 s | 20 ms | 24 ms | – | – |
 | 64 | 128 / 128 | 1103.0 | 8.62 | 4.5 s | 5.4 s | 22 ms | 26 ms | – | – |
+
+## Two tenants, one set of GPUs (week 9, Phase 2 gate)
+
+Fair queuing (ADR 0014), measured on 2026-11-07 with `python -m tollgate_bench fairness`.
+
+**Setup:**
+- The gateway's 2 replicas in front of the two llama-server nodes: 4 slots in all, vLLM off.
+- `support` sends 12 requests at once through one gateway replica. `billing` sends one request
+  every 5 s, from 2 s on, through the other replica.
+- Every request uses the benchmark's prompt (~256 tokens) and 128 output tokens.
+- Run once with `TOLLGATE_FAIR_QUEUE=false` (requests queue first-come inside llama-server) and once
+  with it on.
+
+| Run | Tenant | OK / sent | 429s | First token p50 | First token worst | All done |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| fair queue off | support (burst) | 12 / 12 | 0 | 17.8 s | 33.0 s | 44.1 s |
+| fair queue off | billing (trickle) | 5 / 5 | 0 | 32.4 s | 40.6 s | 63.6 s |
+| fair queue on | support (burst) | 12 / 12 | 0 | 26.4 s | 53.0 s | 62.3 s |
+| fair queue on | billing (trickle) | 5 / 5 | 0 | 13.8 s | 18.0 s | 51.2 s |
+
+**What it says:**
+- **`billing` waits much less behind someone else's burst:** its median wait for a first token
+  drops from 32.4 s to 13.8 s, and its worst from 40.6 s to 18.0 s.
+- **Throughput doesn't change.** All 17 requests are done in 62–64 s either way. The burst finishes
+  later (44 → 62 s) because it now shares the slots.
+- **Each tenant holds 2 of the 4 slots while both are waiting.** `billing`'s remaining wait is mostly
+  generation time: one request every 5 s is about its whole share (2 slots, ~12 s per request), so
+  its requests also wait for each other. A lighter tenant would only wait for the next free slot.
+- **The two replicas share one queue.** The burst and the trickle came in through different gateway
+  replicas, and the queue in Redis still kept them fair.
+- **Each tenant has its own token limit.** With the limit lowered to 1,200 tokens a minute, `billing`'s
+  5 overlapping requests got 2 × 200 and 3 × 429 (`rate_limit_exceeded`, with `Retry-After`). A
+  `support` request sent at the same moment got 200 from its own, full bucket.
+- **The first run found a bug.** `billing` waited 16.7 s median, 24.3 s worst, because admitted
+  requests were routed by `/metrics` that could be a second old: some went to a node that was still
+  full and waited there for a whole generation. The queue now hands out a slot on a specific backend.
+
+To run it again (keys for two tenants in `TG_FLOOD` and `TG_TRICKLE`, a port-forward to each gateway
+pod on 8001 and 8002):
+```
+uv run python -m tollgate_bench fairness --url http://localhost:8001 --trickle-url http://localhost:8002 \
+  --label "fair queue on" --flood-key-env TG_FLOOD --trickle-key-env TG_TRICKLE > bench/raw/fairness-on.jsonl
+uv run python -m tollgate_bench report bench/raw/fairness-*.jsonl
+```

@@ -8,6 +8,8 @@ Tenant (API key or OIDC token)
        2. Admit: per-tenant token budget check in Redis (reserve an estimate)
        3. Route: a local model server by load, vLLM first while it has room (ADR 0013); the hosted
           model only for hosted_allowed tenants, when asked for by name or when local is full
+          Local requests wait for a fair turn at a slot on a specific backend (ADR 0014): the
+          tenant with fewest requests running goes next; 429 + Retry-After past 16 waiting or 120 s
        4. Stream: proxy SSE chunks back to the client, counting tokens as they pass
        5. Settle: release unused reservation; emit one usage event
   -> llama-server on node-1 | llama-server on node-2 | vLLM on workstation | Hosted model (Anthropic API)
@@ -28,7 +30,7 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | llama-server | k3s StatefulSet, 1 pod per GPU node (ADR 0004, 0006) | Model weights on a local PV per node |
 | vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights in a Docker volume |
 | Hosted model | Anthropic API, outside the network; Claude via the `anthropic` SDK (ADR 0013) | None of ours |
-| Redis | k3s Deployment, no persistence yet (ADR 0012) | Token buckets now; queues (week 9) and the usage stream (week 10, needs persistence) |
+| Redis | k3s Deployment, no persistence yet (ADR 0012) | Token buckets, the fair queue with its leases (ADR 0014); the usage stream next (week 10, needs persistence) |
 | Postgres | k3s StatefulSet on node-2 storage (ADR 0011) | Tenants and API keys now; ledger, pricing, invoices in Phase 3 |
 | Keycloak | k3s Deployment, realm `tollgate` (ADR 0010) | Its own database in the same Postgres |
 | Prometheus + Grafana | k3s `monitoring` namespace, kube-prometheus-stack (ADR 0007) | Metrics on a local PV on node-2 |

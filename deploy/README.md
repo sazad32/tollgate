@@ -140,6 +140,20 @@ Log in as `admin`; the password is in the `keycloak-admin` Secret. Ingress repla
 The realm is imported from `keycloak/realm-tollgate.json` on the **first** start only; later edits to that
 file are ignored (change the realm in Keycloak, or export it back into the file).
 
+### Fair queuing
+When every local slot is busy, requests wait in the gateway, in Redis, and each free slot goes to the
+tenant with the fewest requests running, on a specific backend (ADR 0014). A tenant may have 16
+waiting and a request waits at most 120 s; both limits answer 429 with `Retry-After`
+(`TOLLGATE_QUEUE_MAX_WAITING`, `TOLLGATE_QUEUE_MAX_WAIT_S` in `gateway/gateway.env`). If Redis is
+down, requests go ahead unqueued. To see the queue right now:
+```powershell
+kubectl -n tollgate exec deploy/redis -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ZRANGE tollgate:queue:running 0 -1'
+kubectl -n tollgate exec deploy/redis -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ZRANGE tollgate:queue:waiting 0 -1'
+# compare with first-come queuing inside llama-server, then remove the override
+kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_FAIR_QUEUE=false
+kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_FAIR_QUEUE-
+```
+
 ### Rate limits
 Each tenant has a token bucket in Redis (ADR 0012): `TOLLGATE_RATE_LIMITS` in `gateway/gateway.env` sets
 tokens per minute (prompt + output) by tier; the standard tier is 10,000. Every response carries

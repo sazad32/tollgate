@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     hosted_timeout_s: float = 600.0
     hosted_max_retries: int = 2  # the SDK's retries, before the first byte only
 
+    # --- Fair queuing (ADR 0014) ------------------------------------------------------------------
+    # Hold requests in the gateway when every local slot is busy, and hand out free slots fairly
+    # between tenants. Needs Redis; off (false) means requests queue inside the backends instead.
+    fair_queue: bool = True
+    queue_max_waiting: int = 16  # per tenant; one more is a 429
+    queue_max_wait_s: float = 120.0  # then a 429
+    queue_lease_s: float = 30.0  # a dead replica's slots come back after this long
+    queue_poll_s: float = 0.1  # how often a waiting request checks whether it's its turn
+
     # --- Authentication (ADR 0010) ----------------------------------------------------------------
     # Secret key for hashing API keys. Required: the gateway refuses to start without it.
     api_key_pepper: SecretStr

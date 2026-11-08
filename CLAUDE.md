@@ -12,7 +12,7 @@ This is a PUBLIC portfolio repo (Stage 1 of 3). Owner: Saimoon. Read `docs/PLAN.
 `docs/architecture.md` for the design, and `docs/adr/` for decisions already made.
 
 ## Current phase
-**Phase 2 — Gateway (weeks 5–9).** Phase 1 gate met 2026-11-07 (`bench/RESULTS.md`). Update this line at every gate.
+**Phase 3 — Metering and billing (weeks 10–13).** Phase 2 gate met 2026-11-07 (bench/RESULTS.md, two-tenant demo). Update this line at every gate.
 Do not build anything from a later phase unless asked.
 
 ## Repo layout (target)
@@ -72,6 +72,9 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   headless Service), load polled from their /metrics every second. Hosted model `claude-opus-5-5` via the
   `anthropic` SDK, only for `hosted_allowed` tenants; off without the `anthropic-api-key` Secret.
   Responses carry `x-tollgate-backend`.
+- Fair queuing (ADR 0014): local requests wait in Redis (`tollgate:queue:*`) for a slot on a specific
+  backend; the tenant with fewest running goes next; 429 + Retry-After past 16 waiting or 120 s. Leases
+  (30 s, renewed every 10 s) free a dead replica's slots. `TOLLGATE_FAIR_QUEUE=false` turns it off.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -111,6 +114,7 @@ kubectl apply -f deploy/gateway/migrate-job.yaml   # schema migrations, once per
 uv run uvicorn --factory tollgate_gateway.main:create_app --reload  # gateway locally; needs TOLLGATE_API_KEY_PEPPER and TOLLGATE_DATABASE_URL
 uv run python -m tollgate_bench job node-2 | kubectl apply -f -   # benchmark a backend (see bench/README.md)
 uv run python -m tollgate_bench report bench/raw/*.jsonl         # Markdown results table from Job logs
+uv run python -m tollgate_bench fairness --url ... --trickle-url ...  # two-tenant demo (bench/README.md)
 ```
 (Add new commands here as they are created.)
 
