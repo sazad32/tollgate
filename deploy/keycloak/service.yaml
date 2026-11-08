@@ -1,0 +1,15 @@
+# keycloak.tollgate.svc:8080 (tokens, JWKS) and :9000 (health, metrics).
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: management
+      port: 9000
+      targetPort: management

@@ -1,0 +1,106 @@
+# Keycloak issues the tokens the gateway accepts (ADR 0003, ADR 0010). One instance, backed by the
+# `keycloak` database in Postgres. Plain HTTP inside the cluster until the week 17 security pass.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one instance at a time against the same database during upgrades
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/component: identity
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # the image's keycloak user
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keycloak
+          # Pinned by digest. 26.8.2 (2026-11-05).
+          image: quay.io/keycloak/keycloak:26.8.2@sha256:3879c623248408de29a5303178b5816c77e8dfef3890c361f8c0bbeaa979ba3b
+          # `start` is production mode. --import-realm loads realm-tollgate.json on the first start
+          # only; once the realm exists, later edits to the file are ignored (change it in Keycloak).
+          args: ["start", "--import-realm"]
+          env:
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: jdbc:postgresql://postgres.tollgate.svc:5432/keycloak
+            - name: KC_DB_USERNAME
+              value: keycloak
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: KEYCLOAK_DB_PASSWORD
+            # Every token says it was issued by this URL, however Keycloak was reached (a port-forward
+            # or the in-cluster name), so the gateway's issuer check always matches.
+            - name: KC_HOSTNAME
+              value: http://keycloak.tollgate.svc:8080
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_METRICS_ENABLED
+              value: "true"
+            # Heap: half the memory limit. Keycloak builds its configuration at startup in `start`.
+            - name: JAVA_OPTS_KC_HEAP
+              value: "-XX:MaxRAMPercentage=50 -XX:InitialRAMPercentage=25"
+          envFrom:
+            # KC_BOOTSTRAP_ADMIN_USERNAME / _PASSWORD (first admin), made by hand.
+            - secretRef:
+                name: keycloak-admin
+            # SUPPORT_CLIENT_SECRET / BILLING_CLIENT_SECRET, filled into the realm file at import.
+            - secretRef:
+                name: keycloak-clients
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000 # health and metrics
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: management
+            periodSeconds: 10
+            failureThreshold: 30 # up to 5 minutes for the first start
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm

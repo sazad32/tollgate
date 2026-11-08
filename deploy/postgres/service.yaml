@@ -1,0 +1,14 @@
+# postgres.tollgate.svc:5432. Headless (no virtual IP): with one instance, the name resolves straight
+# to the pod, and the StatefulSet needs a governing headless Service anyway.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
