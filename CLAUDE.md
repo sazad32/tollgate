@@ -12,7 +12,7 @@ This is a PUBLIC portfolio repo (Stage 1 of 3). Owner: Saimoon. Read `docs/PLAN.
 `docs/architecture.md` for the design, and `docs/adr/` for decisions already made.
 
 ## Current phase
-**Phase 3 — Metering and billing (weeks 10–13).** Phase 2 gate met 2026-11-07 (bench/RESULTS.md, two-tenant demo). Update this line at every gate.
+**Phase 4 — Reliability and security (weeks 14–17).** Phase 3 gate met 2026-11-08 (bench/RESULTS.md, metering check). Update this line at every gate.
 Do not build anything from a later phase unless asked.
 
 ## Repo layout (target)
