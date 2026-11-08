@@ -159,6 +159,9 @@ def create_app(
     """Build the app. Tests pass settings and fakes for the model servers, the tenant store,
     Anthropic, Keycloak, Redis and the clock; Uvicorn passes none of them."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # httpx logs every request at INFO, including each backend's load poll every second. The gateway
+    # logs what matters itself: where each request went, and backends going down or coming back.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     app = FastAPI(title="Tollgate gateway", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings or Settings()  # type: ignore[call-arg]  (env supplies the rest)
     app.state.upstream_transport = upstream_transport
