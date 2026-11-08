@@ -22,7 +22,8 @@ spec:
     spec:
       # One replica per node, so losing a node leaves one running. A hard rule: as a mere preference
       # (ScheduleAnyway) the scheduler put both on node-2 once Keycloak took memory on node-1.
-      # During a rollout the third (surge) pod still fits: 2 on one node, 1 on the other is skew 1.
+      # matchLabelKeys: count only pods of the same revision. Without it the old pods count during a
+      # rollout, and the week 8 rollout legally ended with both new pods on node-2.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -30,6 +31,8 @@ spec:
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: tollgate-gateway
+          matchLabelKeys:
+            - pod-template-hash
       # Streams can run for minutes. A pod being replaced gets this long to finish the ones in flight.
       terminationGracePeriodSeconds: 120
       automountServiceAccountToken: false
@@ -41,8 +44,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          # Built by .github/workflows/gateway-image.yml from commit 265687a. Pinned by digest.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-265687a@sha256:1b81b9d29fbe8b485c919087d7219ce4f9791992afe97e0a5ee00ff9f9ac78cd
+          # Built by .github/workflows/gateway-image.yml from commit 36daa1b. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-36daa1b@sha256:4383f61362ae57f934a9abb33d31d3865984ddd20f8ae56197fdb6794f6439f8
           ports:
             - name: http
               containerPort: 8000
@@ -53,12 +56,21 @@ spec:
             - secretRef:
                 name: gateway-auth
           env:
-            # Only vLLM needs a key; llama-server ignores it. Optional, so the gateway starts without it.
+            # Sent to every local backend: only vLLM needs it, llama-server ignores it. Optional, so
+            # the gateway starts without it.
             - name: TOLLGATE_UPSTREAM_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: vllm-api-key
                   key: VLLM_API_KEY
+                  optional: true
+            # The hosted model (ADR 0013). Optional: without the Secret there is no hosted model and
+            # every request stays local. Made by hand, never in Git (deploy/README.md).
+            - name: TOLLGATE_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-api-key
+                  key: ANTHROPIC_API_KEY
                   optional: true
             # Token buckets (ADR 0012): redis://:<password>@redis.tollgate.svc:6379/0
             - name: TOLLGATE_REDIS_URL
