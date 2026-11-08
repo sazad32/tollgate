@@ -1,5 +1,7 @@
 """Backends and their load: reading llama-server and vLLM /metrics, and the tracker polling them."""
 
+import asyncio
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -154,3 +156,21 @@ async def test_mark_down_takes_a_backend_out_until_the_next_poll(tracker) -> Non
 
 async def test_backends_are_looked_up_by_name(tracker) -> None:
     assert tracker.backend("node-1").url == "http://node-1:8080"
+
+
+async def test_a_slow_backend_does_not_delay_the_others(servers) -> None:
+    # The workstation switched off: its polls hang until they time out. node-1's must keep coming.
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "vllm":
+            await asyncio.sleep(10)
+        return await servers.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        tracker = LoadTracker(BACKENDS, http)
+        task = asyncio.create_task(tracker.run(interval_s=0.01))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert servers.paths.count("/metrics") > 5  # node-1 polled again and again meanwhile

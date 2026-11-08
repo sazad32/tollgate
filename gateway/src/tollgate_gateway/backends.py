@@ -121,7 +121,12 @@ class LoadTracker:
         state.sent -= sent_before
 
     async def run(self, interval_s: float) -> None:
-        """Poll forever, every interval_s seconds, until cancelled at shutdown."""
-        while True:
-            await self.poll_once()
-            await asyncio.sleep(interval_s)
+        """Poll forever, every interval_s seconds, until cancelled at shutdown. One loop per
+        backend, so one that times out (the workstation switched off) doesn't delay the others."""
+
+        async def loop(name: str) -> None:
+            while True:
+                await self._poll(name)
+                await asyncio.sleep(interval_s)
+
+        await asyncio.gather(*(loop(name) for name in self.backends))
