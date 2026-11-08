@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from tollgate_gateway.errors import openai_error
 from tollgate_gateway.limits import Decision, Limit, TokenBuckets, estimate_tokens, prompt_estimate
+from tollgate_gateway.usage import Tokens
 
 log = logging.getLogger("tollgate.gateway.ratelimit")
 
@@ -102,13 +103,15 @@ def usage_from_body(body: bytes) -> int | None:
 
 class StreamMeter:
     """Watches a streamed reply on its way through: splits it into SSE events, reads the usage
-    report, counts content chunks, and drops the usage-only event if the client didn't ask for it
-    (the gateway always asks upstream, so it can settle with the real count)."""
+    report, counts content chunks, notices error events, and drops the usage-only event if the
+    client didn't ask for it (the gateway always asks upstream, so it can settle with the real
+    count, ADR 0012, and record it, ADR 0015)."""
 
     def __init__(self, keep_usage: bool):
         self.keep_usage = keep_usage
-        self.usage: int | None = None
+        self.usage: Tokens | None = None  # the model's report, once it arrives
         self.content_chunks = 0
+        self.failed = False  # an error event went to the client: the stream broke
         self._buffer = b""
 
     def feed(self, data: bytes) -> list[bytes]:
@@ -125,13 +128,13 @@ class StreamMeter:
         rest, self._buffer = self._buffer, b""
         return rest
 
-    def actual(self, prompt_estimate: int) -> int:
-        """The count to settle with: the server's, or prompt estimate + one token per chunk
+    def tokens(self, prompt_estimate: int) -> Tokens:
+        """What the stream used: the server's report, or prompt estimate + one token per chunk
         sent. llama-server streams one token per chunk; vLLM can pack several, so this may
         undercount there."""
         if self.usage is not None:
             return self.usage
-        return prompt_estimate + self.content_chunks
+        return Tokens(prompt_estimate, self.content_chunks, "estimated")
 
     def _inspect(self, event: bytes) -> bool:
         for line in event.split(b"\n"):
@@ -146,12 +149,17 @@ class StreamMeter:
                 continue
             if not isinstance(chunk, dict):
                 continue
+            if chunk.get("error"):
+                self.failed = True
             choices = chunk.get("choices") or []
             if any((c.get("delta") or {}).get("content") for c in choices if isinstance(c, dict)):
                 self.content_chunks += 1
-            total = usage_total(chunk.get("usage"))
-            if total is not None:
-                self.usage = total
+            usage = chunk.get("usage")
+            if usage_total(usage) is not None:
+                prompt = usage.get("prompt_tokens")
+                completion = usage.get("completion_tokens")
+                if isinstance(prompt, int) and isinstance(completion, int):
+                    self.usage = Tokens(prompt, completion, "reported")
                 if not choices and not self.keep_usage:
                     return False
         return True

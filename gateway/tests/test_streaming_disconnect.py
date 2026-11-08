@@ -7,11 +7,14 @@ halfway through a response.
 import asyncio
 import json
 
+import fakeredis
 import httpx
 import httpx2
 import pytest
 from tollgate_gateway.config import Settings
+from tollgate_gateway.limits import prompt_estimate
 from tollgate_gateway.main import create_app
+from tollgate_gateway.usage import STREAM, UsageEvent
 
 pytestmark = pytest.mark.asyncio
 
@@ -157,3 +160,32 @@ async def test_client_disconnect_closes_the_hosted_stream(auth_store, engineerin
 
     assert sent[0].startswith(b"data: ")  # the client got the start of the reply, then left
     assert stream.closed.is_set()
+
+
+async def test_a_client_that_leaves_mid_stream_is_recorded_as_such(auth_store, support_key) -> None:
+    # Hard problem #1: the usage report never comes, so the event says "estimated", with the
+    # prompt estimate and one token for the chunk that was sent (ADR 0015).
+    stream = HangingStream()
+    redis = fakeredis.FakeAsyncRedis()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    app = create_app(
+        Settings(
+            backends=[{"name": "node-1", "url": "http://upstream"}],
+            load_poll_interval_s=0,
+            api_key_pepper="test-pepper",
+        ),
+        upstream_transport=httpx.MockTransport(handle),
+        auth_store=auth_store,
+        redis_client=redis,
+    )
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+
+    await disconnect_after_first_chunk(app, body, support_key)  # shutdown flushes the events
+
+    [(_, fields)] = await redis.xrange(STREAM)
+    event = UsageEvent.from_fields(fields)
+    assert (event.status, event.token_source) == ("client_disconnected", "estimated")
+    assert (event.input_tokens, event.output_tokens) == (prompt_estimate(body), 1)

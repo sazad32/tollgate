@@ -361,6 +361,7 @@ def make_gateway(
         settings.setdefault("backends", ONE_BACKEND)
         settings.setdefault("load_poll_interval_s", 0)  # tests poll by hand: app.state.loads
         settings.setdefault("queue_poll_s", 0.01)
+        settings.setdefault("usage_retry_s", 0.05)
         settings.setdefault("anthropic_api_key", "test-anthropic-key")
         settings.setdefault("api_key_pepper", PEPPER.decode())
         settings.setdefault("oidc_issuer", ISSUER)

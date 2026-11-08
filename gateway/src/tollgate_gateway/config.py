@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     queue_lease_s: float = 30.0  # a dead replica's slots come back after this long
     queue_poll_s: float = 0.1  # how often a waiting request checks whether it's its turn
 
+    # --- Usage events (ADR 0015) ------------------------------------------------------------------
+    # One event per request a model ran, written to this Redis stream for billing. No Redis: none.
+    usage_stream: str = "tollgate:usage"
+    usage_buffer_max: int = 10_000  # events kept in memory per replica while Redis is down
+    usage_retry_s: float = 5.0  # how often to retry Redis while it's down
+
     # --- Authentication (ADR 0010) ----------------------------------------------------------------
     # Secret key for hashing API keys. Required: the gateway refuses to start without it.
     api_key_pepper: SecretStr
