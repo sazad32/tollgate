@@ -11,7 +11,7 @@ deploy/
   llama-server/          StatefulSet (one replica per GPU node), Services, settings (ADR 0004, 0005)
   postgres/              Postgres 18: databases for the gateway and Keycloak (ADR 0011)
   keycloak/              Keycloak 26 and the tollgate realm export (ADR 0003, 0010)
-  redis/                 Redis 8 for the gateway's token buckets (ADR 0012)
+  redis/                 Redis 8: token buckets, fair queue, usage stream (ADR 0012, 0014, 0015)
   gateway/               the API gateway: Deployment (2 replicas), Service, settings, migration Job (0009, 0010)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
@@ -22,9 +22,10 @@ A local PV only mounts a directory that already exists (needs sudo on the node):
 ```
 # on each GPU node: model weights
 sudo mkdir -p /mnt/storage/tollgate/models
-# on vps-node-2 only: Prometheus and Postgres data, owned by the users they run as
+# on vps-node-2 only: Prometheus, Postgres and Redis data, owned by the users they run as
 sudo mkdir -p /mnt/storage/tollgate/prometheus && sudo chown 1000:2000 /mnt/storage/tollgate/prometheus
 sudo mkdir -p /mnt/storage/tollgate/postgres && sudo chown 999:999 /mnt/storage/tollgate/postgres
+sudo mkdir -p /mnt/storage/tollgate/redis && sudo chown 999:999 /mnt/storage/tollgate/redis
 ```
 The tollgate Secrets (PowerShell). Random 64-character hex values, never printed or written to disk. The
 gateway's database password goes into two Secrets, so it's generated once into `$pg`:
@@ -147,8 +148,8 @@ waiting and a request waits at most 120 s; both limits answer 429 with `Retry-Af
 (`TOLLGATE_QUEUE_MAX_WAITING`, `TOLLGATE_QUEUE_MAX_WAIT_S` in `gateway/gateway.env`). If Redis is
 down, requests go ahead unqueued. To see the queue right now:
 ```powershell
-kubectl -n tollgate exec deploy/redis -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ZRANGE tollgate:queue:running 0 -1'
-kubectl -n tollgate exec deploy/redis -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ZRANGE tollgate:queue:waiting 0 -1'
+kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ZRANGE tollgate:queue:running 0 -1'
+kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ZRANGE tollgate:queue:waiting 0 -1'
 # compare with first-come queuing inside llama-server, then remove the override
 kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_FAIR_QUEUE=false
 kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_FAIR_QUEUE-
@@ -161,11 +162,24 @@ tokens per minute (prompt + output) by tier; the standard tier is 10,000. Every 
 request gets 429 with `Retry-After`. If Redis is down, requests go through unlimited (logged).
 ```powershell
 # a tenant's bucket right now (tokens may be negative: debt from an underestimated request)
-kubectl -n tollgate exec deploy/redis -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" HGETALL tollgate:bucket:support'
+kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" HGETALL tollgate:bucket:support'
 # try a different limit without editing Git, then remove the override
 kubectl -n tollgate set env deploy/tollgate-gateway 'TOLLGATE_RATE_LIMITS={"standard": 400}'
 kubectl -n tollgate set env deploy/tollgate-gateway TOLLGATE_RATE_LIMITS-
 ```
+
+### Usage events
+Every request a model ran gives one event in the Redis stream `tollgate:usage`, for billing (ADR
+0015; the format is in `docs/usage-events.md`). Redis keeps it in an append-only file on node-2, so
+it survives restarts. If Redis is down, the gateway holds events in memory and writes them later.
+```powershell
+kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XLEN tollgate:usage'
+kubectl -n tollgate exec redis-0 -- sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" XRANGE tollgate:usage - + COUNT 5'
+# events lost to a full buffer are logged in full
+kubectl -n tollgate logs deploy/tollgate-gateway | Select-String "usage event"
+```
+**Upgrading from before week 10:** Redis was a Deployment. Delete it before applying, so two Redis
+instances never serve at once: `kubectl -n tollgate delete deploy redis`, then `kubectl apply -k deploy`.
 
 ## Look at the dashboards
 ```powershell

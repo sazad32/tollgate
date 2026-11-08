@@ -17,7 +17,8 @@ Tenant (API key or OIDC token)
 
 ## Usage path (asynchronous — never blocks requests)
 ```
-Gateway -> Redis Streams (usage events, idempotency key per event)
+Gateway -> in-memory buffer -> Redis Streams `tollgate:usage` (one event per request a model ran,
+           idempotency key = request id + ":usage", at least once; ADR 0015, docs/usage-events.md)
         -> Billing consumer -> Postgres usage ledger
                             -> Pricing -> monthly invoices per tenant
         -> Nightly reconciliation: ledger vs model-reported token counts
@@ -30,7 +31,7 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | llama-server | k3s StatefulSet, 1 pod per GPU node (ADR 0004, 0006) | Model weights on a local PV per node |
 | vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights in a Docker volume |
 | Hosted model | Anthropic API, outside the network; Claude via the `anthropic` SDK (ADR 0013) | None of ours |
-| Redis | k3s Deployment, no persistence yet (ADR 0012) | Token buckets, the fair queue with its leases (ADR 0014); the usage stream next (week 10, needs persistence) |
+| Redis | k3s StatefulSet on node-2, append-only file on a local PV (ADR 0015) | Token buckets, the fair queue with its leases (ADR 0014), the usage stream |
 | Postgres | k3s StatefulSet on node-2 storage (ADR 0011) | Tenants and API keys now; ledger, pricing, invoices in Phase 3 |
 | Keycloak | k3s Deployment, realm `tollgate` (ADR 0010) | Its own database in the same Postgres |
 | Prometheus + Grafana | k3s `monitoring` namespace, kube-prometheus-stack (ADR 0007) | Metrics on a local PV on node-2 |

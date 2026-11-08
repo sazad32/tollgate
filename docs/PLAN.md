@@ -28,7 +28,7 @@
 **Gate:** two tenants share one API with separate limits. Met 2026-11-07 (bench/RESULTS.md, two-tenant demo).
 
 ## Phase 3 — Metering and billing (weeks 10–13)
-- [ ] Week 10: Usage event schema with idempotency keys, published to Redis Streams
+- [x] Week 10: Usage event schema with idempotency keys, published to Redis Streams
 - [ ] Week 11: Billing consumer writes a usage ledger in Postgres; partial and cancelled streams handled
 - [ ] Week 12: Pricing tiers per model; monthly invoices per tenant
 - [ ] Week 13: Nightly reconciliation of ledger vs model-reported tokens; draft blog post 1
