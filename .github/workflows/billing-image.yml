@@ -1,0 +1,25 @@
+name: Billing image
+
+# Builds the billing consumer's image (ADR 0016) with the shared image.yml.
+# Feature branches build too, so a change can be deployed to the cluster before it's merged.
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - billing/**
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
+      - .github/workflows/billing-image.yml
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    uses: ./.github/workflows/image.yml
+    with:
+      name: billing
