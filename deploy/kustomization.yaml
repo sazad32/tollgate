@@ -6,6 +6,7 @@ resources:
   - storage
   - llama-server
   - postgres
+  - redis
   - keycloak
   - gateway
   - monitoring

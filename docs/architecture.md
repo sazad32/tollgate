@@ -26,7 +26,7 @@ Gateway -> Redis Streams (usage events, idempotency key per event)
 | Gateway | k3s Deployment, 2 replicas, image from GHCR (ADR 0009) | Stateless |
 | llama-server | k3s StatefulSet, 1 pod per GPU node (ADR 0004, 0006) | Model weights on a local PV per node |
 | vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights in a Docker volume |
-| Redis | k3s StatefulSet | Rate-limit counters, queues, usage stream |
+| Redis | k3s Deployment, no persistence yet (ADR 0012) | Token buckets now; queues (week 9) and the usage stream (week 10, needs persistence) |
 | Postgres | k3s StatefulSet on node-2 storage (ADR 0011) | Tenants and API keys now; ledger, pricing, invoices in Phase 3 |
 | Keycloak | k3s Deployment, realm `tollgate` (ADR 0010) | Its own database in the same Postgres |
 | Prometheus + Grafana | k3s `monitoring` namespace, kube-prometheus-stack (ADR 0007) | Metrics on a local PV on node-2 |

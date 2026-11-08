@@ -7,6 +7,8 @@ Gotcha: values are read when Settings() is created, not on every access; restart
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tollgate_gateway.limits import Limit
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TOLLGATE_")
@@ -36,6 +38,17 @@ class Settings(BaseSettings):
     oidc_jwks_url: str | None = None
     # How long a checked key or tenant is trusted before the database is asked again.
     auth_cache_ttl_s: float = 60.0
+
+    # --- Rate limits (ADR 0012) ------------------------------------------------------------------
+    # Redis for the token buckets: redis://:password@host:6379/0. Unset: no rate limits.
+    redis_url: SecretStr | None = None
+    # Tokens per minute (prompt + output) by tenant tier, as JSON in TOLLGATE_RATE_LIMITS.
+    # A tier not listed here gets the "standard" limit.
+    rate_limits: dict[str, int] = {"standard": 10_000}
+
+    def limit_for(self, tier: str) -> Limit:
+        tokens = self.rate_limits.get(tier, self.rate_limits.get("standard", 10_000))
+        return Limit(tokens_per_minute=tokens)
 
     @property
     def jwks_url(self) -> str | None:

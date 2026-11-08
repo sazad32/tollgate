@@ -2,6 +2,14 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-07 — Week 7: token rate limits
+- Changed: per-tenant token bucket in Redis (atomic Lua); reserve an estimate, settle with real usage;
+  429 with Retry-After and x-ratelimit headers; fail open without Redis (ADR 0012); Redis 8 in k3s.
+- Broke: my first 429 tests let requests through, because settlement refunded the reservation; they
+  now use a reply that really spends the budget.
+- Measured: at 400 tokens/min, a stream in flight held 309 tokens; a concurrent request got 429
+  (retry in 30 s) while the other tenant got 200.
+
 ## 2026-11-07 — Week 6: tenant authentication
 - Changed: /v1 now needs a tenant API key (HMAC-hashed) or a Keycloak token (ADR 0010); Postgres 18 and
   Keycloak 26 in k3s (ADR 0011); migration Job, admin CLI; 47 tests written first.

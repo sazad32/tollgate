@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 
+import fakeredis
 import httpx
 import jwt
 import pytest
@@ -27,7 +28,10 @@ CHUNKS = [
     {"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 2}},
 ]
 SSE_BODY = "".join(f"data: {json.dumps(c)}\n\n" for c in CHUNKS).encode() + b"data: [DONE]\n\n"
-COMPLETION = {"choices": [{"message": {"role": "assistant", "content": "Hello"}}], "usage": {}}
+COMPLETION = {
+    "choices": [{"message": {"role": "assistant", "content": "Hello"}}],
+    "usage": {"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14},
+}
 
 PEPPER = b"test-pepper"
 ISSUER = "http://keycloak.test/realms/tollgate"
@@ -87,6 +91,7 @@ def auth_store(support_key: str) -> InMemoryAuthStore:
     store = InMemoryAuthStore()
     store.tenants = {
         "support": Tenant(id="support", name="Support team"),
+        "billing": Tenant(id="billing", name="Billing team"),
         "legacy": Tenant(id="legacy", name="Retired team", disabled=True),
     }
 
@@ -180,17 +185,47 @@ def make_token(signing_key: rsa.RSAPrivateKey) -> Callable[..., str]:
 
 
 @pytest.fixture
-def make_gateway(upstream: FakeUpstream, auth_store: InMemoryAuthStore, keycloak: FakeKeycloak):
+def redis() -> fakeredis.FakeAsyncRedis:
+    """An in-memory Redis that runs the real Lua scripts."""
+    return fakeredis.FakeAsyncRedis()
+
+
+class Clock:
+    """A clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock() -> Clock:
+    return Clock()
+
+
+@pytest.fixture
+def make_gateway(
+    upstream: FakeUpstream,
+    auth_store: InMemoryAuthStore,
+    keycloak: FakeKeycloak,
+    redis: fakeredis.FakeAsyncRedis,
+    clock: Clock,
+):
     def build(**settings: object):
         settings.setdefault("upstream_url", "http://upstream")
         settings.setdefault("api_key_pepper", PEPPER.decode())
         settings.setdefault("oidc_issuer", ISSUER)
         settings.setdefault("oidc_audience", AUDIENCE)
+        settings.setdefault("rate_limits", {"standard": 1_000_000})  # out of the way by default
         return create_app(
             Settings(**settings),
             upstream_transport=httpx.MockTransport(upstream.handle),
             auth_store=auth_store,
             jwks_transport=httpx.MockTransport(keycloak.handle),
+            redis_client=redis,
+            clock=clock,
         )
 
     return build

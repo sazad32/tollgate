@@ -1,0 +1,82 @@
+# Redis for the gateway's token buckets (ADR 0012). One instance, no persistence: losing the buckets
+# is harmless, because a missing bucket reads as full. Week 10's usage stream will need persistence
+# (an append-only file on a volume); that's when this becomes a StatefulSet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: cache
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999 # the image's redis user
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          # Pinned by digest. 8.10.3.
+          image: redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: REDIS_PASSWORD
+          args:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            # No snapshots, no append-only file: nothing here needs to survive a restart (yet).
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            # Hard memory cap. When full, evict only keys with an expiry (the buckets), never keys
+            # without one, such as week 10's usage stream.
+            - --maxmemory
+            - 64mb
+            - --maxmemory-policy
+            - volatile-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data # Redis's working directory; empty, as nothing is saved
+      volumes:
+        - name: data
+          emptyDir: {}
