@@ -95,6 +95,12 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   counter skips cached tokens, so input isn't compared); fails on a gap (KubeJobFailed). No automatic
   corrections. Traffic straight to a model server (benchmarks, port-forwards) shows up as a gap.
   `tollgate_bench metering` + `tollgate_billing check-requests` audit requests one by one.
+- Load tests (ADR 0019): `deploy/loadtest` (applied by hand, deleted after): fake model server `tollgate-mock`
+  (bench `mock.py`, 4 uvicorn workers) + `tollgate-gateway-load`; tenant `loadtest` (tier `loadtest`), key in
+  the hand-made `loadtest-key` Secret; `mock-model` priced 0.00. Clients: `tollgate_bench load-job` (Indexed
+  Job, ~150 streams per pod: one client process fills a core at ~250-300). Gateway metrics at `/metrics`
+  (PodMonitor `tollgate-gateways`). Targets (the Phase 4 gate): 1,000 streams on 2 replicas, gateway adds
+  <= 50 ms p99 first token and <= 10 ms p99 token gap, no errors. Week 14: 2 replicas hold 250 streams.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
@@ -141,6 +147,7 @@ kubectl apply -f deploy/billing/migrate-job.yaml   # billing's migrations, once 
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing invoice preview support   # also: finalize|show|list|verify
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing reconcile --day 2026-11-09   # or --start/--end; default yesterday
 uv run python -m tollgate_bench metering --url http://localhost:8000 --key support=TG_SUPPORT > bench/raw/m.jsonl   # then check-requests (bench/README.md)
+kubectl apply -k deploy/loadtest   # load-test rig; then tollgate_bench load-job ... | kubectl apply -f - (bench/README.md); delete -k after
 docker run -d --rm --name tollgate-test-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:54329:5432 postgres:18.6-bookworm  # then TOLLGATE_TEST_DATABASE_URL (billing/README.md)
 ```
 (Add new commands here as they are created.)

@@ -30,7 +30,7 @@ Gateway -> in-memory buffer -> Redis Streams `tollgate:usage` (one event per req
 ## Components
 | Component | Runs where | State |
 | --- | --- | --- |
-| Gateway | k3s Deployment, 2 replicas, image from GHCR (ADR 0009) | Stateless; polls backend load every second (ADR 0013) |
+| Gateway | k3s Deployment, 2 replicas, image from GHCR (ADR 0009) | Stateless; polls backend load every second (ADR 0013); its own metrics at /metrics (ADR 0019) |
 | llama-server | k3s StatefulSet, 1 pod per GPU node (ADR 0004, 0006) | Model weights on a local PV per node |
 | vLLM | Docker on the workstation, outside k3s (ADR 0004) | Model weights in a Docker volume |
 | Hosted model | Anthropic API, outside the network; Claude via the `anthropic` SDK (ADR 0013) | None of ours |

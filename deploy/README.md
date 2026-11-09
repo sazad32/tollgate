@@ -14,6 +14,7 @@ deploy/
   redis/                 Redis 8: token buckets, fair queue, usage stream (ADR 0012, 0014, 0015)
   gateway/               the API gateway: Deployment (2 replicas), Service, settings, migration Job (0009, 0010)
   billing/               billing: consumer Deployment, invoice CronJob, prices.toml, database and migration Jobs (0016, 0017)
+  loadtest/              a fake model server and a gateway in front of it, for load tests only (ADR 0019)
   monitoring/            Prometheus + Grafana, DCGM GPU exporter, scrape targets, dashboards (ADR 0007)
   workstation/vllm/      vLLM in Docker on the workstation, outside k3s (ADR 0004)
 ```
