@@ -206,3 +206,64 @@ uv run python -m tollgate_bench metering --url http://localhost:8000 --key suppo
 kubectl -n tollgate exec -i deploy/tollgate-billing -- python -m tollgate_billing check-requests < bench/raw/metering.jsonl
 kubectl -n tollgate exec deploy/tollgate-billing -- python -m tollgate_billing reconcile --start <start> --end <end, 30 s after the run>
 ```
+
+## Where async Python breaks (week 14, Phase 4)
+
+Measured on 2026-11-09 with `python -m tollgate_bench load` (ADR 0019). The gateway sent to a fake
+model server: exactly 256 tokens per request, the first after 100 ms, then 20 a second. The GPUs
+were out of the way. The clients ran as 7 pods, about 150 streams each. Each step held its number
+of open streams for 45 s.
+
+**The clients and the fake server alone** (no gateway): clean up to 1,000 streams.
+
+| Run | Streams | Starts/s | OK / sent | Errors | First token p50 / p99 | Token gap p50 / p99 / p99.9 | Max open | Client late |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| client -> mock | 250 | 19.5 | 882 / 882 | – | 110 / 120 | 51 / 51 / 52 | 259 | 0 starts, lag 90 ms |
+| client -> mock | 500 | 38.9 | 1,757 / 1,757 | – | 110 / 120 | 50 / 52 / 59 | 504 | 0 starts, lag 29 ms |
+| client -> mock | 1,000 | 77.8 | 3,507 / 3,507 | – | 110 / 140 | 50 / 58 / 84 | 1,008 | 0 starts, lag 58 ms |
+
+**Through the gateway** (the load-test copy, same image and resources as production):
+
+| Run | Streams | Starts/s | OK / sent | Errors | First token p50 / p99 | Token gap p50 / p99 / p99.9 | Max open | Client late |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| gateway, 1 replica | 100 | 7.8 | 357 / 357 | – | 140 / 560 | 50 / 68 / 150 | 105 | 0 starts, lag 111 ms |
+| gateway, 1 replica | 250 | 19.5 | 790 / 882 | RemoteProtocolError ×92 | 4,000 / 62,000 | 51 / 250 / 550 | 423 | 0 starts, lag 11 ms |
+| gateway, 1 replica | 500 | 38.9 | 511 / 1,757 | HTTP 429 ×195, RemoteProtocolError ×1051 | 15,000 / 65,000 | 1 / 620 / 2,100 | 1,388 | 0 starts, lag 5 ms |
+| gateway, 1 replica | 1,000 | 77.8 | 278 / 3,507 | ConnectError ×119, HTTP 429 ×719, HTTP 503 ×444, HTTP 504 ×197, ReadError ×272, ReadTimeout ×6, RemoteProtocolError ×1472 (out of memory, restarted) | 6,100 / 27,000 | 1 / 1,100 / 2,400 | 1,750 | 7 starts, lag 201 ms |
+| gateway, 2 replicas | 100 | 7.8 | 357 / 357 | – | 130 / 430 | 50 / 66 / 150 | 105 | 0 starts, lag 107 ms |
+| gateway, 2 replicas | 250 | 19.5 | 882 / 882 | – | 150 / 320 | 50 / 88 / 160 | 259 | 0 starts, lag 3 ms |
+| gateway, 2 replicas | 500 | 38.9 | 1,739 / 1,757 | ReadTimeout ×18 | 4,400 / 112,000 | 51 / 250 / 730 | 811 | 0 starts, lag 6 ms |
+| gateway, 2 replicas | 1,000 | 77.8 | 2,661 / 3,507 | HTTP 429 ×571, HTTP 503 ×267, HTTP 504 ×1, ReadTimeout ×7 | 50,000 / 114,000 | 1 / 520 / 1,200 | 2,253 | 0 starts, lag 23 ms |
+
+**Inside the gateway** (its own metrics, one replica; p99 over a minute):
+
+| Streams | CPU (cores) | Event-loop lag | Key check | Redis rate limit | Fair queue | Model's headers |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 0.24 | 12 ms | < 1 ms | 10 ms | 23 ms | 50 ms |
+| 250 | 0.60 | 70 ms | 118 ms | 70 ms | 177 ms | 1.9 s |
+| 500 | 0.87–1.0 | 380–500 ms | 1.7 s | 0.4–0.9 s | 0.5–1.3 s | ≥ 5 s |
+| 1,000 | ~0.9, then out of memory | 2.1 s | 3.2 s | 1.0 s | 2.2 s | ≥ 5 s |
+
+**What it says:**
+- **The latency targets aren't met at any load.** At 2 replicas and 250 streams, the gateway adds
+  about 200 ms to p99 time to first token (target 50) and about 37 ms to p99 token gaps (target
+  10).
+- **Two replicas hold 250 streams without errors, and fail at 500**: a quarter of the 1,000-stream
+  target.
+- **The first limit is a setting, not Python.** The upstream connection pool allows 200
+  connections per replica, so stream 201 waits up to 10 s for one.
+- **Then one core runs out.** A replica's single event loop is full at about 500 streams (10,000
+  tokens a second, each read from the model and written to the client). Its lag then slows
+  everything: even a cached key check takes 1.7 s.
+- **Under load, rate limits and the fair queue switch themselves off.** redis-py's pool of 100
+  connections runs dry, and the gateway fails open, as designed for a Redis outage. Queue slots
+  it can't release leak for 30 s.
+- **Nothing pushes back.** In-flight requests grow until the pod runs out of memory, and every
+  connection drops at once.
+- **Billing kept up.** The stream's backlog stayed at 0, with every request a model ran in the
+  ledger once.
+- **The client is a limit too.** One client process fills a core at about 250–300 streams, which
+  is why the clients ran 7 pods at about 150 each.
+
+To run it again (bench/README.md, "Load test"): apply `deploy/loadtest`, then run `load-job` for
+the fake server alone and for the gateway, and `load-report` on the logs.
