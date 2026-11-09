@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     queue_lease_s: float = 30.0  # a dead replica's slots come back after this long
     queue_poll_s: float = 0.1  # how often a waiting request checks whether it's its turn
 
+    # --- Metrics and the event loop (ADR 0019) ---------------------------------------------------
+    # How often to measure event-loop lag; 0 turns it off.
+    loop_lag_interval_s: float = 0.25
+    # asyncio's debug mode: logs every step that holds the event loop longer than slow_callback_s,
+    # naming the code. It slows everything down, so only for a load-test run.
+    loop_debug: bool = False
+    slow_callback_s: float = 0.1
+
     # --- Usage events (ADR 0015) ------------------------------------------------------------------
     # One event per request a model ran, written to this Redis stream for billing. No Redis: none.
     usage_stream: str = "tollgate:usage"

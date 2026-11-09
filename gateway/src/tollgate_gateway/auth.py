@@ -149,8 +149,9 @@ class Authenticator:
 
 async def require_principal(request: Request) -> Principal:
     """FastAPI dependency for every /v1 route; also stores the principal on request.state."""
-    principal = await request.app.state.authenticator.authenticate(
-        request.headers.get("authorization")
-    )
+    with request.app.state.metrics.timed("auth"):
+        principal = await request.app.state.authenticator.authenticate(
+            request.headers.get("authorization")
+        )
     request.state.principal = principal
     return principal
