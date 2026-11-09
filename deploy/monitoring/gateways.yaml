@@ -1,0 +1,23 @@
+# Scrape target for the gateway's own metrics (ADR 0019): every pod with component=gateway, so the
+# production gateway and the load-test copy (deploy/loadtest) both. `gateway` is the Deployment's
+# name label, so the two can be told apart.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: tollgate-gateways
+  namespace: tollgate
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: gateway
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          targetLabel: gateway
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

@@ -1,0 +1,14 @@
+# The load-test rig (ADR 0019): a fake model server and a gateway in front of it. NOT part of
+# `kubectl apply -k deploy`: apply it for a load test, delete it after (bench/README.md):
+#   kubectl -n tollgate create configmap bench-client --from-file=bench/src/tollgate_bench --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -k deploy/loadtest
+#   kubectl delete -k deploy/loadtest
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: tollgate
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: tollgate
+resources:
+  - mock.yaml
+  - gateway-load.yaml

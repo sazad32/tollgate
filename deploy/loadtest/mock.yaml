@@ -1,0 +1,84 @@
+# A fake model server for load tests (ADR 0019): OpenAI-compatible, no GPU, 20 tokens a second per
+# stream after 100 ms. The gateway's load-test copy routes to it, so the GPUs are out of the way and
+# a load test measures the gateway. Runs bench/src/tollgate_bench/mock.py from the bench-client
+# ConfigMap on uv's image (no image to build), with several uvicorn worker processes, so the mock is
+# never the thing that breaks: check that first with a run straight at it (bench/README.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tollgate-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tollgate-mock
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tollgate-mock
+        app.kubernetes.io/component: loadtest
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: vps-node-1 # 8 cores; the gateway under test runs on node-2
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mock
+          # The bench Job's image (bench/src/tollgate_bench/job.py).
+          image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
+          command: ["uv", "run", "--no-project", "--with", "uvicorn==0.54.0", "python", "-m", "uvicorn"]
+          args: ["tollgate_bench.mock:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080",
+                 "--workers", "4", "--log-level", "warning", "--no-access-log"]
+          env:
+            - name: PYTHONPATH
+              value: /app
+            - name: UV_CACHE_DIR
+              value: /tmp/uv-cache
+            - name: HOME
+              value: /tmp
+            - name: MOCK_TOKENS_PER_S
+              value: "20"
+            - name: MOCK_FIRST_TOKEN_MS
+              value: "100"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: code
+              mountPath: /app/tollgate_bench
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: bench-client
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tollgate-mock
+spec:
+  selector:
+    app.kubernetes.io/name: tollgate-mock
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
