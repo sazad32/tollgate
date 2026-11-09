@@ -13,6 +13,7 @@ import anyio
 import httpx
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from tollgate_gateway.admission import Admission, Ticket, queue_refused
@@ -66,6 +67,12 @@ async def readyz() -> dict[str, str]:
     return {"status": "ready"}
 
 
+@router.get("/metrics", include_in_schema=False)
+async def metrics(request: Request) -> Response:
+    """For Prometheus (ADR 0019). Open, like the health checks: timings, no tenant data."""
+    return Response(request.app.state.metrics.render(), media_type=CONTENT_TYPE_LATEST)
+
+
 @v1.get("/v1/models")
 async def list_models(request: Request) -> dict:
     """The models this tenant can ask for, from config: no backend has to be up to answer."""
@@ -99,9 +106,11 @@ async def chat_completions(request: Request) -> Response:
     # 1. Reserve the estimate (ADR 0012). None: no limits applied (not configured, or Redis down).
     settings = request.app.state.settings
     tenant = principal.tenant
-    reservation = await reserve(
-        request.app.state.buckets, tenant.id, settings.limit_for(tenant.tier), payload
-    )
+    metrics = request.app.state.metrics
+    with metrics.timed("rate_limit"):
+        reservation = await reserve(
+            request.app.state.buckets, tenant.id, settings.limit_for(tenant.tier), payload
+        )
     if reservation is not None and not reservation.decision.allowed:
         return rate_limited(reservation)
     headers = limit_headers(reservation.decision) if reservation else {}
@@ -147,9 +156,10 @@ async def chat_completions(request: Request) -> Response:
     ticket: Ticket | None = None
     admission: Admission | None = request.app.state.admission
     if admission is not None:
-        outcome = await admission.wait_for_slot(
-            tenant.id, request_id, loads.available, request.is_disconnected
-        )
+        with metrics.timed("queue"):
+            outcome = await admission.wait_for_slot(
+                tenant.id, request_id, loads.available, request.is_disconnected
+            )
         if not isinstance(outcome, Ticket):
             await usage.refund()
             if outcome is None:
@@ -206,14 +216,15 @@ async def forward_local(
         upstream_body = {**payload, "stream_options": {**options, "include_usage": True}}
 
     try:
-        backend, upstream = await open_local(
-            request.app.state.upstream,
-            request.app.state.loads,
-            route.backends,
-            "/v1/chat/completions",
-            request_id=request_id,
-            json_body=upstream_body,
-        )
+        with request.app.state.metrics.timed("upstream_headers"):
+            backend, upstream = await open_local(
+                request.app.state.upstream,
+                request.app.state.loads,
+                route.backends,
+                "/v1/chat/completions",
+                request_id=request_id,
+                json_body=upstream_body,
+            )
     except httpx.HTTPError as exc:
         log.warning("request %s: no local backend answered: %r", request_id, exc)
         await release()

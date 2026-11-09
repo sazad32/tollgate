@@ -33,3 +33,11 @@ model = "claude-opus-5-5"
 from = "2026-11"
 input = [{ per_million = "4.40" }]
 output = [{ per_million = "22.00" }]
+
+# The fake model server used by load tests (ADR 0019; deploy/loadtest). Free: its requests are
+# synthetic, from the `loadtest` tenant, and only here so invoices and `invoice verify` stay whole.
+[[prices]]
+model = "mock-model"
+from = "2026-11"
+input = [{ per_million = "0.00" }]
+output = [{ per_million = "0.00" }]

@@ -2,6 +2,20 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-09 — Week 14: load tests, where async Python breaks
+- Changed: the gateway has its own `/metrics`, with stage timings and event-loop lag. A fake model
+  server and an open-loop load generator now test the gateway without GPUs. The latency targets
+  were set before measuring (ADR 0019).
+- Broke: four limits in the gateway:
+  - a 200-connection upstream pool;
+  - a single CPU core;
+  - redis-py's 100-connection pool (when it runs out, rate limits fail open);
+  - no backpressure, so it ran out of memory.
+
+  A single client process also fills a core at about 250 streams.
+- Measured: 2 replicas hold 250 streams without errors and fail at 500, against a target of 1,000.
+  At that load the gateway adds about 200 ms to p99 first token.
+
 ## 2026-11-08 — Week 13: reconciliation, blog draft (Phase 3 gate met)
 - Changed: a nightly CronJob checks each backend's ledger output tokens against the server's own
   counter in Prometheus, and fails on a gap. A request audit (`tollgate_bench metering`,

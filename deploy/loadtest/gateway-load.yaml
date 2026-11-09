@@ -1,0 +1,101 @@
+# A second gateway, only for load tests (ADR 0019): the same image and the same Redis and Postgres as
+# deploy/gateway, but its only backend is the fake model server, and the `loadtest` tier has a rate
+# limit high enough not to get in the way. The production gateway isn't touched, and its Service
+# doesn't select these pods (another name label).
+# Usage events go to the real stream and ledger as tenant `loadtest`, model `mock-model` (priced at
+# 0.00 in deploy/billing/prices.toml), so billing's throughput is part of the test.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tollgate-gateway-load
+spec:
+  replicas: 1 # one first, to find what one replica holds; then 2, as in production
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tollgate-gateway-load
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tollgate-gateway-load
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: tollgate
+    spec:
+      # The first replica on node-2, away from the mock and the load clients on node-1, so its CPU
+      # is its own. A second replica may land anywhere.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["vps-node-2"]
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          # Keep in step with deploy/gateway/deployment.yaml.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-1c4d674@sha256:b7e3d58e09545212c8e28c759d3aaa1bc544b09d10eabb7889ae1e9f129f2494
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            # TOLLGATE_API_KEY_PEPPER and TOLLGATE_DATABASE_URL: the same tenants and keys.
+            - secretRef:
+                name: gateway-auth
+          env:
+            - name: TOLLGATE_BACKENDS
+              value: '[{"name": "mock", "url": "http://tollgate-mock.tollgate.svc:8080", "kind": "llama", "slots": 5000, "priority": 0}]'
+            - name: TOLLGATE_LOCAL_MODEL
+              value: mock-model
+            - name: TOLLGATE_RATE_LIMITS
+              value: '{"standard": 10000, "loadtest": 1000000000}'
+            - name: TOLLGATE_FAIR_QUEUE
+              value: "true" # the queue still runs, in Redis, on every request; 5000 slots never fill
+            - name: TOLLGATE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: TOLLGATE_REDIS_URL
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources: # as in production
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tollgate-gateway-load
+spec:
+  selector:
+    app.kubernetes.io/name: tollgate-gateway-load
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

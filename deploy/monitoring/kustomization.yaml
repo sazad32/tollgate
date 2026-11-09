@@ -5,6 +5,7 @@ resources:
   - kube-prometheus-stack.yaml
   - dcgm-exporter.yaml
   - model-servers.yaml
+  - gateways.yaml
 # Dashboards as ConfigMaps. Grafana's sidecar loads any ConfigMap labelled grafana_dashboard: "1"
 # into the folder named by the grafana_folder annotation. No hash suffix: a renamed ConfigMap would
 # leave the old copy behind and Grafana would see the same dashboard twice.

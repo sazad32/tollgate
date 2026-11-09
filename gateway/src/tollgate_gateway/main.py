@@ -30,6 +30,7 @@ from tollgate_gateway.errors import openai_error
 from tollgate_gateway.hosted import make_hosted
 from tollgate_gateway.jwt_auth import JwksCache, JwtValidator
 from tollgate_gateway.limits import TokenBuckets
+from tollgate_gateway.metrics import GatewayMetrics, LoopLagMonitor, MetricsMiddleware
 from tollgate_gateway.queue import FairQueue
 from tollgate_gateway.routes import router
 from tollgate_gateway.tenants import AuthStore
@@ -68,6 +69,17 @@ class RequestIdMiddleware:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     log = logging.getLogger("tollgate.gateway")
+    loop = asyncio.get_running_loop()
+    if settings.loop_debug:
+        loop.set_debug(True)
+        loop.slow_callback_duration = settings.slow_callback_s
+        log.warning("asyncio debug mode on: steps over %.0f ms are logged; everything is slower",
+                    settings.slow_callback_s * 1000)  # fmt: skip
+    lag_monitor = None
+    if settings.loop_lag_interval_s > 0:
+        lag_monitor = asyncio.create_task(
+            LoopLagMonitor(app.state.metrics, settings.loop_lag_interval_s).run()
+        )
     app.state.upstream = make_client(settings, app.state.upstream_transport)
 
     # Routing (ADR 0013): the local backends' load, read in the background; the hosted model.
@@ -150,12 +162,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             retry_s=settings.usage_retry_s,
         )  # fmt: skip
         emitting = asyncio.create_task(app.state.usage.run())
+        emitter = app.state.usage
+        app.state.metrics.usage_buffered.set_function(lambda: emitter.pending)
     else:
         log.warning("TOLLGATE_REDIS_URL not set: no usage events")
     try:
         yield
     finally:
-        for task in (poller, renewals, emitting):
+        for task in (poller, renewals, emitting, lag_monitor):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -170,6 +184,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await engine.dispose()
         if own_redis:
             await redis.aclose()
+        if settings.loop_debug:
+            loop.set_debug(False)
 
 
 async def auth_error_response(request: Request, exc: Exception) -> JSONResponse:
@@ -204,7 +220,9 @@ def create_app(
     app.state.jwks_transport = jwks_transport
     app.state.redis_client = redis_client
     app.state.clock = clock
+    app.state.metrics = GatewayMetrics()
     app.include_router(router)
     app.add_exception_handler(AuthError, auth_error_response)
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(MetricsMiddleware)  # outermost: it times everything, request ID included
     return app

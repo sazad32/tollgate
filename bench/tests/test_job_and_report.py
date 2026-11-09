@@ -44,3 +44,37 @@ def test_report_skips_non_json_lines_and_builds_a_table() -> None:
     assert "### b" in table
     assert "| 8 | 32 / 32 | 25.0 | 0.20 | 400 ms | 2.5 s | 80 ms | 100 ms | 71 °C | – |" in table
     assert "256 prompt / 128 output" in table
+
+
+def test_a_load_job_runs_one_pod_per_share_of_the_load_all_starting_together() -> None:
+    from tollgate_bench.job import load_manifest
+
+    job = load_manifest(name="load-1", url="http://tollgate-gateway-load.tollgate.svc:8000",
+                        label="1 replica", steps="100,500", step_s=60, pods=3,
+                        start_at=1_800_000_000.0, key_secret="loadtest-key")  # fmt: skip
+
+    spec = job["spec"]
+    assert (job["metadata"]["name"], spec["completionMode"]) == ("load-1", "Indexed")
+    assert spec["completions"] == spec["parallelism"] == 3
+    pod = spec["template"]["spec"]
+    assert pod["nodeSelector"] == {"kubernetes.io/hostname": "vps-node-1"}
+    [container] = pod["containers"]
+    args = container["args"]
+    assert args[:2] == ["-m", "tollgate_bench"]
+    assert args[args.index("--pods") + 1] == "3"
+    assert args[args.index("--start-at") + 1] == "1800000000.0"
+    assert args[args.index("--steps") + 1] == "100,500"
+    assert args[args.index("--key-env") + 1] == "TG_LOAD_KEY"
+    key = next(e for e in container["env"] if e["name"] == "TG_LOAD_KEY")
+    assert key["valueFrom"]["secretKeyRef"] == {"name": "loadtest-key", "key": "TG_LOAD_KEY"}
+
+
+def test_a_load_job_straight_at_the_mock_needs_no_key() -> None:
+    from tollgate_bench.job import load_manifest
+
+    job = load_manifest(name="load-0", url="http://tollgate-mock.tollgate.svc:8080", label="mock",
+                        steps="100", step_s=30, pods=1, start_at=1.0, key_secret=None)  # fmt: skip
+
+    [container] = job["spec"]["template"]["spec"]["containers"]
+    assert "--key-env" not in container["args"]
+    assert not any(e["name"] == "TG_LOAD_KEY" for e in container["env"])
