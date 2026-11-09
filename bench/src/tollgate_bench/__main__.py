@@ -16,7 +16,7 @@ import httpx
 from tollgate_bench.client import run_level
 from tollgate_bench.fairness import fairness_table, run_fairness, summarize_fairness
 from tollgate_bench.gpu import gpu_window
-from tollgate_bench.job import manifest
+from tollgate_bench.job import load_manifest, manifest
 from tollgate_bench.load import load_table, merge_steps, plan_steps, run_load
 from tollgate_bench.metering import run_metering
 from tollgate_bench.metering import summary as metering_summary
@@ -202,12 +202,27 @@ def main(argv: list[str] | None = None) -> None:
     p_load.add_argument("--start-at", type=float, help="unix time all pods start (default: now)")
     p_load.add_argument("--key-env", help="environment variable holding the API key")
     p_load.add_argument("--model", default="mock-model")
+    p_ljob = commands.add_parser("load-job", help="print the Indexed Job for a load run, as JSON")
+    p_ljob.add_argument("--name", required=True, help="the Job's name, e.g. load-1-replica")
+    p_ljob.add_argument("--url", required=True)
+    p_ljob.add_argument("--label", required=True)
+    p_ljob.add_argument("--steps", default="100,250,500,1000")
+    p_ljob.add_argument("--step-s", type=float, default=60.0)
+    p_ljob.add_argument("--pods", type=int, default=2)
+    p_ljob.add_argument("--start-in", type=float, default=60.0, help="seconds, for pods to start")
+    p_ljob.add_argument("--key-secret", help="Secret with TG_LOAD_KEY (none: straight at the mock)")
     p_lrep = commands.add_parser("load-report", help="Markdown table from load step records")
     p_lrep.add_argument("files", nargs="+")
 
     args = parser.parse_args(argv)
     if args.command == "load":
         load(args)
+    elif args.command == "load-job":
+        job = load_manifest(name=args.name, url=args.url, label=args.label, steps=args.steps,
+                            step_s=args.step_s, pods=args.pods,
+                            start_at=round(time.time() + args.start_in),
+                            key_secret=args.key_secret)  # fmt: skip
+        print(json.dumps(job, indent=2))
     elif args.command == "load-report":
         records = []
         for name in args.files:

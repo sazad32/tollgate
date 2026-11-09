@@ -96,3 +96,73 @@ def manifest(
             },
         },
     }
+
+
+LOAD_CLIENT_NODE = "vps-node-1"  # 8 cores, with the mock; the gateway under test runs on node-2
+
+
+def load_manifest(*, name: str, url: str, label: str, steps: str, step_s: float, pods: int,
+                  start_at: float, key_secret: str | None) -> dict:  # fmt: skip
+    """An Indexed Job for `load` (ADR 0019): `pods` client pods, each sending its share of every
+    step (it knows which share from JOB_COMPLETION_INDEX), all starting at `start_at`."""
+    args = ["-m", "tollgate_bench", "load", "--url", url, "--label", label, "--steps", steps,
+            "--step-s", str(step_s), "--pods", str(pods), "--start-at", str(start_at)]  # fmt: skip
+    env = [
+        {"name": "PYTHONPATH", "value": "/app"},
+        {"name": "PYTHONUNBUFFERED", "value": "1"},
+        {"name": "UV_CACHE_DIR", "value": "/tmp/uv-cache"},
+        {"name": "HOME", "value": "/tmp"},
+    ]
+    if key_secret:
+        args += ["--key-env", "TG_LOAD_KEY"]
+        env.append(
+            {
+                "name": "TG_LOAD_KEY",
+                "valueFrom": {"secretKeyRef": {"name": key_secret, "key": "TG_LOAD_KEY"}},
+            }
+        )
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": name,
+            "namespace": "tollgate",
+            "labels": {"app.kubernetes.io/name": "tollgate-load"},
+        },  # fmt: skip
+        "spec": {
+            "completionMode": "Indexed",
+            "completions": pods,
+            "parallelism": pods,
+            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": 86400,
+            "template": {
+                "metadata": {"labels": {"app.kubernetes.io/name": "tollgate-load"}},
+                "spec": {
+                    "restartPolicy": "Never",
+                    "nodeSelector": {"kubernetes.io/hostname": LOAD_CLIENT_NODE},
+                    "securityContext": {"runAsNonRoot": True, "runAsUser": 65534},
+                    "containers": [
+                        {
+                            "name": "load",
+                            "image": IMAGE,
+                            "command": ["uv", "run", "--no-project", "--with", HTTPX, "python"],
+                            "args": args,
+                            "env": env,
+                            "resources": {
+                                "requests": {"cpu": "500m", "memory": "256Mi"},
+                                "limits": {"memory": "1Gi"},
+                            },
+                            "volumeMounts": [
+                                {
+                                    "name": "code",
+                                    "mountPath": "/app/tollgate_bench",
+                                    "readOnly": True,
+                                }
+                            ],
+                        }
+                    ],  # fmt: skip
+                    "volumes": [{"name": "code", "configMap": {"name": "bench-client"}}],
+                },
+            },
+        },
+    }
