@@ -1,4 +1,4 @@
-"""Command line: `python -m tollgate_bench run|job|report|fairness|metering ...`.
+"""Command line: `python -m tollgate_bench run|job|report|fairness|metering|load|load-report`.
 
 See bench/README.md.
 """
@@ -17,6 +17,7 @@ from tollgate_bench.client import run_level
 from tollgate_bench.fairness import fairness_table, run_fairness, summarize_fairness
 from tollgate_bench.gpu import gpu_window
 from tollgate_bench.job import manifest
+from tollgate_bench.load import load_table, merge_steps, plan_steps, run_load
 from tollgate_bench.metering import run_metering
 from tollgate_bench.metering import summary as metering_summary
 from tollgate_bench.report import markdown_table, read_records
@@ -111,6 +112,26 @@ async def metering(args: argparse.Namespace) -> None:
         log(line)
 
 
+def load(args: argparse.Namespace) -> None:
+    pod = args.pod if args.pod is not None else int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
+    api_key = os.environ[args.key_env] if args.key_env else None
+    steps = plan_steps([int(x) for x in args.steps.split(",")], step_s=args.step_s,
+                       tokens=args.tokens, tokens_per_s=args.tokens_per_s,
+                       first_token_s=args.first_token_ms / 1000, pods=args.pods)  # fmt: skip
+    start_at = args.start_at or time.time() + 2
+    log(f"{args.label}: pod {pod} of {args.pods}, {len(steps)} steps of {args.step_s:.0f} s, "
+        f"starting {start_at - time.time():.0f} s from now")  # fmt: skip
+    results = asyncio.run(run_load(args.url, steps, tokens=args.tokens, api_key=api_key,
+                                   start_at=start_at, model=args.model))  # fmt: skip
+    for result in results:
+        emit(result.to_record(args.label, pod))
+        p99 = result.ttft.percentile(99)
+        log(f"step {result.step.index}: {result.step.concurrency} streams wanted, "
+            f"{result.ok}/{result.sent} ok, first token p99 "
+            f"{'-' if p99 is None else f'{p99 * 1000:.0f} ms'}, errors {dict(result.errors)}, "
+            f"{result.late_starts} late starts")  # fmt: skip
+
+
 def main(argv: list[str] | None = None) -> None:
     # Windows writes redirected output in its legacy code page, which garbles "°C" in RESULTS.md.
     sys.stdout.reconfigure(encoding="utf-8")
@@ -168,8 +189,32 @@ def main(argv: list[str] | None = None) -> None:
     p_meter.add_argument("--hang-up-after", type=int, default=5, help="content chunks")
     p_meter.add_argument("--run-id", default=time.strftime("%Y%m%d-%H%M%S"))
 
+    p_load = commands.add_parser("load", help="open-loop load test in steps (ADR 0019)")
+    p_load.add_argument("--url", required=True, help="gateway (or mock) base URL, without /v1")
+    p_load.add_argument("--label", required=True, help="name of this run in the table")
+    p_load.add_argument("--steps", default="100,250,500,1000", help="streams to keep open")
+    p_load.add_argument("--step-s", type=float, default=60.0, help="seconds per step")
+    p_load.add_argument("--tokens", type=int, default=256, help="max_tokens per request")
+    p_load.add_argument("--tokens-per-s", type=float, default=20.0, help="the mock's pace")
+    p_load.add_argument("--first-token-ms", type=float, default=100.0, help="the mock's delay")
+    p_load.add_argument("--pods", type=int, default=1, help="client pods sharing the load")
+    p_load.add_argument("--pod", type=int, help="this pod (default: JOB_COMPLETION_INDEX)")
+    p_load.add_argument("--start-at", type=float, help="unix time all pods start (default: now)")
+    p_load.add_argument("--key-env", help="environment variable holding the API key")
+    p_load.add_argument("--model", default="mock-model")
+    p_lrep = commands.add_parser("load-report", help="Markdown table from load step records")
+    p_lrep.add_argument("files", nargs="+")
+
     args = parser.parse_args(argv)
-    if args.command == "metering":
+    if args.command == "load":
+        load(args)
+    elif args.command == "load-report":
+        records = []
+        for name in args.files:
+            with open(name, encoding="utf-8") as f:
+                records += read_records(f)
+        print(load_table(merge_steps(records)))
+    elif args.command == "metering":
         asyncio.run(metering(args))
     elif args.command == "run":
         asyncio.run(run(args))
