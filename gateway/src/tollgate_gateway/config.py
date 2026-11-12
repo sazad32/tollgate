@@ -4,7 +4,7 @@
 Gotcha: values are read when Settings() is created, not on every access; restart to pick up changes.
 """
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tollgate_gateway.backends import Backend
@@ -33,7 +33,12 @@ class Settings(BaseSettings):
     # Below llama-server's 5 s keep-alive, so we never reuse a connection the server is closing
     # (the week 4 benchmark lost 6 requests to exactly that race).
     upstream_keepalive_expiry_s: float = 2.0
-    upstream_max_connections: int = 200
+    # Connections to the model servers, at most. Unset: twice the backends' slots, at least 200
+    # (more requests than slots wait in the fair queue, not here).
+    upstream_max_connections: int | None = Field(default=None, ge=1)
+    # Split across this many separate pools (ADR 0020): httpcore's bookkeeping grows with the square
+    # of one pool's size, so several small pools cost far less CPU than one big one.
+    upstream_pools: int = Field(default=16, ge=1)
 
     # --- Hosted model (ADR 0013) ------------------------------------------------------------------
     # Unset: no hosted model at all; every request stays local.
@@ -91,6 +96,12 @@ class Settings(BaseSettings):
     # Tokens per minute (prompt + output) by tenant tier, as JSON in TOLLGATE_RATE_LIMITS.
     # A tier not listed here gets the "standard" limit.
     rate_limits: dict[str, int] = {"standard": 10_000}
+
+    @property
+    def max_upstream_connections(self) -> int:
+        if self.upstream_max_connections is not None:
+            return self.upstream_max_connections
+        return max(200, 2 * sum(b.slots for b in self.backends))
 
     def limit_for(self, tier: str) -> Limit:
         tokens = self.rate_limits.get(tier, self.rate_limits.get("standard", 10_000))

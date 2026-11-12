@@ -218,7 +218,7 @@ async def forward_local(
     try:
         with request.app.state.metrics.timed("upstream_headers"):
             backend, upstream = await open_local(
-                request.app.state.upstream,
+                request.app.state.upstream.pick(),
                 request.app.state.loads,
                 route.backends,
                 "/v1/chat/completions",

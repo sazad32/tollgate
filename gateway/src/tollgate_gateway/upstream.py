@@ -5,7 +5,10 @@ Gotcha: there's no IHttpClientFactory; the app creates and closes this single in
 (main.py, lifespan). It has no base URL: each request names its backend's full URL.
 """
 
+import functools
 import logging
+import math
+import ssl
 
 import httpx
 
@@ -21,26 +24,65 @@ log = logging.getLogger("tollgate.gateway.upstream")
 RETRY_SAFE = (httpx.ConnectError, httpx.RemoteProtocolError)
 
 
-def make_client(
+@functools.cache
+def _tls() -> ssl.SSLContext:
+    """One TLS context for every pool, made once: each client loads the CA bundle otherwise,
+    0.3 s apiece. (The model servers speak plain HTTP today; this is for when they don't.)"""
+    return httpx.create_ssl_context()
+
+
+class UpstreamClients:
+    """Several HTTP clients, each with its own small connection pool, taken in turn (ADR 0020).
+
+    Why not one: every time a request starts or ends, httpcore's pool walks all its connections,
+    and for each idle one it walks them all again. With ~400 connections in one pool that was a
+    quarter of the gateway's CPU. Sixteen pools of 25 do the same job with walks 16 times shorter.
+    A response is always read through the client that sent its request, so taking clients in turn
+    is safe. .NET: like several HttpClient instances, each with its own SocketsHttpHandler.
+    """
+
+    def __init__(self, clients: list[httpx.AsyncClient], per_pool_max: int) -> None:
+        self.clients = clients
+        self.per_pool_max = per_pool_max
+        self._next = 0
+
+    def pick(self) -> httpx.AsyncClient:
+        client = self.clients[self._next]
+        self._next = (self._next + 1) % len(self.clients)
+        return client
+
+    async def aclose(self) -> None:
+        for client in self.clients:
+            await client.aclose()
+
+
+def make_clients(
     settings: Settings, transport: httpx.AsyncBaseTransport | None = None
-) -> httpx.AsyncClient:
+) -> UpstreamClients:
     headers = {}
     if settings.upstream_api_key is not None:
         headers["Authorization"] = f"Bearer {settings.upstream_api_key.get_secret_value()}"
-    return httpx.AsyncClient(
-        headers=headers,
-        timeout=httpx.Timeout(
-            connect=settings.upstream_connect_timeout_s,
-            read=settings.upstream_read_timeout_s,
-            write=10.0,
-            pool=10.0,
-        ),
-        limits=httpx.Limits(
-            max_connections=settings.upstream_max_connections,
-            keepalive_expiry=settings.upstream_keepalive_expiry_s,
-        ),
-        transport=transport,
-    )
+    per_pool = max(1, math.ceil(settings.max_upstream_connections / settings.upstream_pools))
+    clients = [
+        httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(
+                connect=settings.upstream_connect_timeout_s,
+                read=settings.upstream_read_timeout_s,
+                write=10.0,
+                pool=10.0,
+            ),
+            limits=httpx.Limits(
+                max_connections=per_pool,
+                max_keepalive_connections=per_pool,
+                keepalive_expiry=settings.upstream_keepalive_expiry_s,
+            ),
+            verify=_tls(),
+            transport=transport,
+        )
+        for _ in range(settings.upstream_pools)
+    ]
+    return UpstreamClients(clients, per_pool)
 
 
 async def open_local(

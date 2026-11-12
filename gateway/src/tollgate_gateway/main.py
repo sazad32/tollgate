@@ -34,7 +34,7 @@ from tollgate_gateway.metrics import GatewayMetrics, LoopLagMonitor, MetricsMidd
 from tollgate_gateway.queue import FairQueue
 from tollgate_gateway.routes import router
 from tollgate_gateway.tenants import AuthStore
-from tollgate_gateway.upstream import make_client
+from tollgate_gateway.upstream import make_clients
 from tollgate_gateway.usage import UsageEmitter
 
 
@@ -80,10 +80,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lag_monitor = asyncio.create_task(
             LoopLagMonitor(app.state.metrics, settings.loop_lag_interval_s).run()
         )
-    app.state.upstream = make_client(settings, app.state.upstream_transport)
+    app.state.upstream = make_clients(settings, app.state.upstream_transport)
 
     # Routing (ADR 0013): the local backends' load, read in the background; the hosted model.
-    app.state.loads = LoadTracker(settings.backends, app.state.upstream)
+    # One pool is plenty for the load polls: a request a second per backend.
+    app.state.loads = LoadTracker(settings.backends, app.state.upstream.clients[0])
     poller = None
     if settings.load_poll_interval_s > 0:
         poller = asyncio.create_task(app.state.loads.run(settings.load_poll_interval_s))

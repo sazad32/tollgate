@@ -367,6 +367,7 @@ def make_gateway(
         settings.setdefault("oidc_issuer", ISSUER)
         settings.setdefault("oidc_audience", AUDIENCE)
         settings.setdefault("rate_limits", {"standard": 1_000_000})  # out of the way by default
+        settings.setdefault("upstream_pools", 2)  # more than one, but cheap to build per test
         return create_app(
             Settings(**settings),
             upstream_transport=httpx.MockTransport(upstream.handle),
