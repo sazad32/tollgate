@@ -62,15 +62,24 @@ class _State:
     up: bool = True  # until a poll says otherwise: the first requests don't wait for a poll
     busy: int = 0  # running + waiting, at the last poll
     sent: int = 0  # requests this replica sent there since the last poll
+    timeouts: int = 0  # polls in a row that got no answer in time
 
 
 class LoadTracker:
     def __init__(
-        self, backends: list[Backend], client: httpx.AsyncClient, timeout_s: float = 1.0
+        self,
+        backends: list[Backend],
+        client: httpx.AsyncClient,
+        timeout_s: float = 1.0,
+        down_after_timeouts: int = 3,
     ) -> None:
         self.backends = {b.name: b for b in backends}
         self.client = client
         self.timeout_s = timeout_s
+        # A refused connection or an error status means down at once. A poll that just takes too
+        # long may be this gateway's own event loop running late under load (week 14), so only
+        # this many in a row count as down.
+        self.down_after_timeouts = down_after_timeouts
         self._state = {name: _State() for name in self.backends}
 
     def backend(self, name: str) -> Backend:
@@ -118,6 +127,10 @@ class LoadTracker:
         try:
             response = await self.client.get(backend.url + "/metrics", timeout=self.timeout_s)
         except httpx.HTTPError as exc:
+            if isinstance(exc, httpx.TimeoutException):
+                state.timeouts += 1
+                if state.timeouts < self.down_after_timeouts:
+                    return  # keep the last known state
             if state.up:
                 log.warning("backend %s is down: %r", name, exc)
             state.up = False
@@ -130,6 +143,7 @@ class LoadTracker:
         if not state.up:
             log.info("backend %s is back", name)
         state.up = True
+        state.timeouts = 0
         state.busy = parse_load(backend.kind, response.text)
         state.sent -= sent_before
 
