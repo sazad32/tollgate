@@ -52,7 +52,7 @@ spec:
                 name: gateway-auth
           env:
             - name: TOLLGATE_BACKENDS
-              value: '[{"name": "mock", "url": "http://tollgate-mock.tollgate.svc:8080", "kind": "llama", "slots": 5000, "priority": 0}]'
+              value: '[{"name": "mock", "url": "http://tollgate-mock.tollgate.svc.cluster.local.:8080", "kind": "llama", "slots": 5000, "priority": 0}]'
             - name: TOLLGATE_LOCAL_MODEL
               value: mock-model
             - name: TOLLGATE_RATE_LIMITS
@@ -81,7 +81,7 @@ spec:
               cpu: 100m
               memory: 128Mi
             limits:
-              memory: 256Mi
+              memory: 512Mi # thousands of open streams fit (ADR 0020); TOLLGATE_MAX_IN_FLIGHT caps them
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

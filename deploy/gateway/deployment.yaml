@@ -95,7 +95,7 @@ spec:
               cpu: 100m
               memory: 128Mi
             limits:
-              memory: 256Mi
+              memory: 512Mi # thousands of open streams fit (ADR 0020); TOLLGATE_MAX_IN_FLIGHT caps them
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
