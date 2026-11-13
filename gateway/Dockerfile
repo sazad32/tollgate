@@ -27,4 +27,7 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 # Not root, and not root's group either. Kubernetes enforces this too (runAsNonRoot in deploy/gateway).
 USER 10001:10001
 EXPOSE 8000
-CMD ["uvicorn", "--factory", "tollgate_gateway.main:create_app", "--host", "0.0.0.0", "--port", "8000"]
+# uvicorn picks uvloop and httptools when installed (ADR 0020). Keep-alive longer than clients'
+# (httpx: 5 s), so the server never closes an idle connection just as a client reuses it: the
+# week 14 load test lost requests to that race.
+CMD ["uvicorn", "--factory", "tollgate_gateway.main:create_app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "65"]
