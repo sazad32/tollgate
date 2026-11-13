@@ -44,8 +44,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          # Built by .github/workflows/gateway-image.yml from commit 1c4d674. Pinned by digest.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-1c4d674@sha256:b7e3d58e09545212c8e28c759d3aaa1bc544b09d10eabb7889ae1e9f129f2494
+          # Built by .github/workflows/gateway-image.yml from commit 92e3862. Pinned by digest.
+          image: ghcr.io/sazad32/tollgate-gateway:sha-92e3862@sha256:506a1cfa2178ed865fa5b2b37a51474032cac32470ebe7f861c1e607c6efc81d
           ports:
             - name: http
               containerPort: 8000

@@ -42,7 +42,7 @@ spec:
       containers:
         - name: gateway
           # Keep in step with deploy/gateway/deployment.yaml.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-1c4d674@sha256:b7e3d58e09545212c8e28c759d3aaa1bc544b09d10eabb7889ae1e9f129f2494
+          image: ghcr.io/sazad32/tollgate-gateway:sha-92e3862@sha256:506a1cfa2178ed865fa5b2b37a51474032cac32470ebe7f861c1e607c6efc81d
           ports:
             - name: http
               containerPort: 8000
@@ -59,6 +59,8 @@ spec:
               value: '{"standard": 10000, "loadtest": 1000000000}'
             - name: TOLLGATE_FAIR_QUEUE
               value: "true" # the queue still runs, in Redis, on every request; 5000 slots never fill
+            - name: TOLLGATE_MAX_IN_FLIGHT
+              value: "300" # one process saturates near 300 streams: past it, a quick 503 (ADR 0020)
             - name: TOLLGATE_REDIS_URL
               valueFrom:
                 secretKeyRef:
