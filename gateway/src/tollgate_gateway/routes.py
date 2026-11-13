@@ -111,6 +111,8 @@ async def chat_completions(request: Request) -> Response:
         reservation = await reserve(
             request.app.state.buckets, tenant.id, settings.limit_for(tenant.tier), payload
         )
+    if reservation is None and request.app.state.buckets is not None:
+        metrics.fail_open.labels(step="rate_limit").inc()  # Redis failed: no limit this time
     if reservation is not None and not reservation.decision.allowed:
         return rate_limited(reservation)
     headers = limit_headers(reservation.decision) if reservation else {}

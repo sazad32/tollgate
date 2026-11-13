@@ -18,7 +18,7 @@ import httpx
 import httpx2
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from redis.asyncio import Redis
+from redis.asyncio import BlockingConnectionPool, Redis
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tollgate_gateway.admission import Admission
@@ -30,7 +30,12 @@ from tollgate_gateway.errors import openai_error
 from tollgate_gateway.hosted import make_hosted
 from tollgate_gateway.jwt_auth import JwksCache, JwtValidator
 from tollgate_gateway.limits import TokenBuckets
-from tollgate_gateway.metrics import GatewayMetrics, LoopLagMonitor, MetricsMiddleware
+from tollgate_gateway.metrics import (
+    GatewayMetrics,
+    InFlightLimit,
+    LoopLagMonitor,
+    MetricsMiddleware,
+)
 from tollgate_gateway.queue import FairQueue
 from tollgate_gateway.routes import router
 from tollgate_gateway.tenants import AuthStore
@@ -63,6 +68,22 @@ class RequestIdMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_id)
+
+
+def make_redis(settings: Settings) -> Redis:
+    """The Redis client for rate limits, the queue and usage events. Short socket timeouts: if
+    Redis is down, fail open within half a second rather than holding every request up. A pool that
+    waits briefly for a free connection (ADR 0020): redis-py's default fails at once past 100, and
+    under load every rate limit and queue step then failed open (week 14)."""
+    assert settings.redis_url is not None
+    pool = BlockingConnectionPool.from_url(
+        settings.redis_url.get_secret_value(),
+        max_connections=settings.redis_max_connections,
+        timeout=settings.redis_pool_timeout_s,
+        socket_timeout=0.5,
+        socket_connect_timeout=0.5,
+    )
+    return Redis.from_pool(pool)  # closing the client closes the pool too
 
 
 @asynccontextmanager
@@ -130,9 +151,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis = app.state.redis_client
     own_redis = False
     if redis is None and settings.redis_url is not None:
-        redis = Redis.from_url(
-            settings.redis_url.get_secret_value(), socket_timeout=0.5, socket_connect_timeout=0.5
-        )
+        redis = make_redis(settings)
         own_redis = True
     if redis is None:
         log.warning("TOLLGATE_REDIS_URL not set: no rate limits")
@@ -148,9 +167,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             lease_s=settings.queue_lease_s,
             max_waiting=settings.queue_max_waiting,
         )
+        fail_open = app.state.metrics.fail_open
         app.state.admission = Admission(
             queue, app.state.clock, max_wait_s=settings.queue_max_wait_s,
             poll_s=settings.queue_poll_s,
+            on_fail_open=lambda step: fail_open.labels(step=step).inc(),
         )  # fmt: skip
         renewals = asyncio.create_task(app.state.admission.run_renewals())
     # Usage events for billing (ADR 0015), in the same Redis. The request path only appends to
@@ -175,6 +196,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        if app.state.admission is not None:
+            app.state.admission.cancel_pending()
         if app.state.usage is not None:
             await app.state.usage.flush(timeout_s=5.0)  # what's still queued, before Redis closes
         if app.state.hosted is not None:
@@ -224,6 +247,8 @@ def create_app(
     app.state.metrics = GatewayMetrics()
     app.include_router(router)
     app.add_exception_handler(AuthError, auth_error_response)
+    # Starlette runs the last one added first: metrics, then the request ID, then the cap.
+    app.add_middleware(InFlightLimit, max_in_flight=app.state.settings.max_in_flight)
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(MetricsMiddleware)  # outermost: it times everything, request ID included
     return app

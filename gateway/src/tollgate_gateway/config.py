@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     queue_lease_s: float = 30.0  # a dead replica's slots come back after this long
     queue_poll_s: float = 0.1  # how often a waiting request checks whether it's its turn
 
+    # --- Load (ADR 0020) --------------------------------------------------------------------------
+    # Model requests one replica serves at once; past it, a quick 503 + Retry-After instead of
+    # piling up until the pod runs out of memory. Unset: no cap.
+    max_in_flight: int | None = Field(default=None, ge=0)
+    # Redis connections, at most. Past it a call waits up to redis_pool_timeout_s for a free one,
+    # then fails (and that step fails open). redis-py's default pool has 100 and doesn't wait.
+    redis_max_connections: int = Field(default=500, ge=1)
+    redis_pool_timeout_s: float = 0.5
+
     # --- Metrics and the event loop (ADR 0019) ---------------------------------------------------
     # How often to measure event-loop lag; 0 turns it off.
     loop_lag_interval_s: float = 0.25

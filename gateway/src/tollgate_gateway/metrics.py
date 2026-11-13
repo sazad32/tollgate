@@ -21,6 +21,8 @@ from contextlib import contextmanager
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from tollgate_gateway.errors import openai_error
+
 log = logging.getLogger("tollgate.gateway.metrics")
 
 # Seconds. Stages are short (Redis, a cached key), requests long (a whole stream).
@@ -55,6 +57,9 @@ class GatewayMetrics:
         self.usage_buffered = Gauge("tollgate_gateway_usage_buffered",
                                     "Usage events waiting in memory to be written to Redis",
                                     registry=r)  # fmt: skip
+        self.fail_open = Counter("tollgate_gateway_redis_fail_open",
+                                 "Times a step went ahead without Redis (rate limit, queue)",
+                                 ["step"], registry=r)  # fmt: skip
         self.loop_lag_max_s = 0.0
 
     @contextmanager
@@ -103,6 +108,40 @@ class MetricsMiddleware:
             metrics.in_flight.dec()
             metrics.duration.observe(time.perf_counter() - start)
             metrics.requests.labels(status=str(status or 500)).inc()
+
+
+class InFlightLimit:
+    """Backpressure (ADR 0020): at most `max_in_flight` model requests at once on this replica.
+    One more is refused at once with 503 and Retry-After, cheaply, before any work is done for
+    it. Without a cap, requests piled up until the pod ran out of memory and dropped every
+    connection at once (week 14). Health checks and /metrics never count.
+
+    .NET: like ASP.NET Core's ConcurrencyLimiter middleware with a queue of 0.
+    """
+
+    PATHS = ("/v1/chat/completions",)
+
+    def __init__(self, app: ASGIApp, max_in_flight: int | None = None) -> None:
+        self.app = app
+        self.max_in_flight = max_in_flight
+        self.in_flight = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (self.max_in_flight is None or scope["type"] != "http"
+                or scope["path"] not in self.PATHS):  # fmt: skip
+            await self.app(scope, receive, send)
+            return
+        if self.in_flight >= self.max_in_flight:
+            refused = openai_error(503, "The gateway is at capacity. Try again shortly.",
+                                   "server_error", "overloaded")  # fmt: skip
+            refused.headers["Retry-After"] = "1"
+            await refused(scope, receive, send)
+            return
+        self.in_flight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.in_flight -= 1
 
 
 class LoopLagMonitor:
