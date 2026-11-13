@@ -122,3 +122,18 @@ def test_steps_from_several_pods_merge_into_one_row() -> None:
     assert row["rate_per_s"] == pytest.approx(4.0)
     assert row["ttft_p50_s"] == pytest.approx(0.3, abs=0.01)
     assert row["max_in_flight"] == 100
+
+
+@pytest.mark.asyncio
+async def test_streams_are_spread_over_several_small_pools() -> None:
+    # One big httpx pool costs CPU with the square of its size (ADR 0020): the client would be
+    # the bottleneck long before the gateway.
+    from tollgate_bench.load import CLIENT_POOLS, make_clients
+
+    clients = make_clients()
+    try:
+        assert len(clients) == CLIENT_POOLS == 16
+        assert len({id(c) for c in clients}) == 16
+    finally:
+        for c in clients:
+            await c.aclose()

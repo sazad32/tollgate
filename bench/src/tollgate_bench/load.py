@@ -190,7 +190,7 @@ async def _watch_lag(result: StepResult, stop: asyncio.Event, interval_s: float 
                                       loop.time() - start - interval_s)  # fmt: skip
 
 
-async def send_step(client: httpx.AsyncClient, base_url: str, step: StepPlan, *, tokens: int,
+async def send_step(clients: list[httpx.AsyncClient], base_url: str, step: StepPlan, *, tokens: int,
                     api_key: str | None, model: str = "mock-model",
                     ) -> tuple[StepResult, list[asyncio.Task]]:  # fmt: skip
     """Start the step's requests on schedule; return at once when the step's time is up, with the
@@ -213,6 +213,7 @@ async def send_step(client: httpx.AsyncClient, base_url: str, step: StepPlan, *,
         elif delay < -LATE_S:
             result.late_starts += 1
         body = request_body(model, tokens, step.index * 1_000_000 + i)
+        client = clients[i % len(clients)]
         tasks.append(asyncio.create_task(one_stream(client, url, headers, body, result)))
         result.sent += 1
     stop.set()
@@ -220,19 +221,34 @@ async def send_step(client: httpx.AsyncClient, base_url: str, step: StepPlan, *,
     return result, tasks
 
 
-def make_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
+CLIENT_POOLS = 16
+
+
+def make_clients(transport: httpx.AsyncBaseTransport | None = None) -> list[httpx.AsyncClient]:
+    """Sixteen clients, used in turn. httpcore's pool does work that grows with the square of its
+    size (ADR 0020), so one pool of thousands would make this client the bottleneck."""
     # No pool limit to speak of: the gateway, not the client's pool, must be what holds requests up.
-    limits = httpx.Limits(max_connections=20_000, max_keepalive_connections=20_000)
+    limits = httpx.Limits(max_connections=2_000, max_keepalive_connections=2_000)
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=60.0)
-    return httpx.AsyncClient(timeout=timeout, limits=limits, transport=transport)
+    tls = httpx.create_ssl_context()  # once: each client would load the CA bundle, 0.3 s apiece
+    return [httpx.AsyncClient(timeout=timeout, limits=limits, transport=transport, verify=tls)
+            for _ in range(CLIENT_POOLS)]  # fmt: skip
+
+
+async def _close(clients: list[httpx.AsyncClient]) -> None:
+    for client in clients:
+        await client.aclose()
 
 
 async def run_step(base_url: str, step: StepPlan, *, tokens: int, api_key: str | None,
                    transport: httpx.AsyncBaseTransport | None = None) -> StepResult:  # fmt: skip
     """One step on its own, waiting for its last stream."""
-    async with make_client(transport) as client:
-        result, tasks = await send_step(client, base_url, step, tokens=tokens, api_key=api_key)
+    clients = make_clients(transport)
+    try:
+        result, tasks = await send_step(clients, base_url, step, tokens=tokens, api_key=api_key)
         await asyncio.gather(*tasks)
+    finally:
+        await _close(clients)
     return result
 
 
@@ -240,16 +256,19 @@ async def run_load(base_url: str, steps: list[StepPlan], *, tokens: int, api_key
                    start_at: float, model: str = "mock-model") -> list[StepResult]:  # fmt: skip
     """Every step, each starting at start_at + its offset (wall clock, so several pods line up)."""
     results, tasks = [], []
-    async with make_client() as client:
+    clients = make_clients()
+    try:
         for step in steps:
             wait = start_at + step.start_offset_s - time.time()
             if wait > 0:
                 await asyncio.sleep(wait)
-            result, step_tasks = await send_step(client, base_url, step, tokens=tokens,
+            result, step_tasks = await send_step(clients, base_url, step, tokens=tokens,
                                                  api_key=api_key, model=model)  # fmt: skip
             results.append(result)
             tasks += step_tasks
         await asyncio.gather(*tasks)
+    finally:
+        await _close(clients)
     return results
 
 
