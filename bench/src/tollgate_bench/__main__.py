@@ -16,7 +16,7 @@ import httpx
 from tollgate_bench.client import run_level
 from tollgate_bench.fairness import fairness_table, run_fairness, summarize_fairness
 from tollgate_bench.gpu import gpu_window
-from tollgate_bench.job import load_manifest, manifest
+from tollgate_bench.job import LOAD_CLIENT_NODES, load_manifest, manifest, parse_nodes
 from tollgate_bench.load import load_table, merge_steps, plan_steps, run_load
 from tollgate_bench.metering import run_metering
 from tollgate_bench.metering import summary as metering_summary
@@ -113,7 +113,8 @@ async def metering(args: argparse.Namespace) -> None:
 
 
 def load(args: argparse.Namespace) -> None:
-    pod = args.pod if args.pod is not None else int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
+    index = args.pod if args.pod is not None else int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
+    pod = index + args.pod_offset  # a run's second Job (another node) numbers its pods on
     api_key = os.environ[args.key_env] if args.key_env else None
     steps = plan_steps([int(x) for x in args.steps.split(",")], step_s=args.step_s,
                        tokens=args.tokens, tokens_per_s=args.tokens_per_s,
@@ -199,6 +200,7 @@ def main(argv: list[str] | None = None) -> None:
     p_load.add_argument("--first-token-ms", type=float, default=100.0, help="the mock's delay")
     p_load.add_argument("--pods", type=int, default=1, help="client pods sharing the load")
     p_load.add_argument("--pod", type=int, help="this pod (default: JOB_COMPLETION_INDEX)")
+    p_load.add_argument("--pod-offset", type=int, default=0, help="added to --pod")
     p_load.add_argument("--start-at", type=float, help="unix time all pods start (default: now)")
     p_load.add_argument("--key-env", help="environment variable holding the API key")
     p_load.add_argument("--model", default="mock-model")
@@ -208,7 +210,11 @@ def main(argv: list[str] | None = None) -> None:
     p_ljob.add_argument("--label", required=True)
     p_ljob.add_argument("--steps", default="100,250,500,1000")
     p_ljob.add_argument("--step-s", type=float, default=60.0)
-    p_ljob.add_argument("--pods", type=int, default=2)
+    p_ljob.add_argument(
+        "--nodes",
+        default=",".join(f"{n}={p}" for n, p in LOAD_CLIENT_NODES.items()),
+        help="client pods per node, e.g. vps-node-1=5,vps-node-2=2",
+    )
     p_ljob.add_argument("--start-in", type=float, default=60.0, help="seconds, for pods to start")
     p_ljob.add_argument("--key-secret", help="Secret with TG_LOAD_KEY (none: straight at the mock)")
     p_lrep = commands.add_parser("load-report", help="Markdown table from load step records")
@@ -219,7 +225,7 @@ def main(argv: list[str] | None = None) -> None:
         load(args)
     elif args.command == "load-job":
         job = load_manifest(name=args.name, url=args.url, label=args.label, steps=args.steps,
-                            step_s=args.step_s, pods=args.pods,
+                            step_s=args.step_s, nodes=parse_nodes(args.nodes),
                             start_at=round(time.time() + args.start_in),
                             key_secret=args.key_secret)  # fmt: skip
         print(json.dumps(job, indent=2))
