@@ -13,6 +13,8 @@ IMAGE = (
     "@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58"
 )
 HTTPX = "httpx==0.28.1"  # keep in step with uv.lock
+UVLOOP = "uvloop==0.23.0"  # keep in step with uv.lock; makes load clients cheaper
+LOAD_COMMAND = ["uv", "run", "--no-project", "--with", HTTPX, "--with", UVLOOP, "python"]
 
 
 def job_name(target: Target) -> str:
@@ -171,7 +173,7 @@ def _load_job(*, name: str, run: str, node: str, pods: int, args: list[str],
                         {
                             "name": "load",
                             "image": IMAGE,
-                            "command": ["uv", "run", "--no-project", "--with", HTTPX, "python"],
+                            "command": LOAD_COMMAND,
                             "args": args,
                             "env": env,
                             "resources": {

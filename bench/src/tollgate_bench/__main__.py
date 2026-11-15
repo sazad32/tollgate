@@ -17,7 +17,7 @@ from tollgate_bench.client import run_level
 from tollgate_bench.fairness import fairness_table, run_fairness, summarize_fairness
 from tollgate_bench.gpu import gpu_window
 from tollgate_bench.job import LOAD_CLIENT_NODES, load_manifest, manifest, parse_nodes
-from tollgate_bench.load import load_table, merge_steps, plan_steps, run_load
+from tollgate_bench.load import fast_runner, load_table, merge_steps, plan_steps, run_load
 from tollgate_bench.metering import run_metering
 from tollgate_bench.metering import summary as metering_summary
 from tollgate_bench.report import markdown_table, read_records
@@ -122,7 +122,7 @@ def load(args: argparse.Namespace) -> None:
     start_at = args.start_at or time.time() + 2
     log(f"{args.label}: pod {pod} of {args.pods}, {len(steps)} steps of {args.step_s:.0f} s, "
         f"starting {start_at - time.time():.0f} s from now")  # fmt: skip
-    results = asyncio.run(run_load(args.url, steps, tokens=args.tokens, api_key=api_key,
+    results = fast_runner()(run_load(args.url, steps, tokens=args.tokens, api_key=api_key,
                                    start_at=start_at, model=args.model))  # fmt: skip
     for result in results:
         emit(result.to_record(args.label, pod))

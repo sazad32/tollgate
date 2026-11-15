@@ -19,7 +19,9 @@ import asyncio
 import math
 import time
 from collections import defaultdict
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 
@@ -270,6 +272,20 @@ async def run_load(base_url: str, steps: list[StepPlan], *, tokens: int, api_key
     finally:
         await _close(clients)
     return results
+
+
+def fast_runner() -> Callable[[Coroutine], Any]:
+    """uvloop's runner when it's installed (the load Job installs it), else asyncio's own. One
+    client process fills a core at a few hundred streams; uvloop makes each cheaper, which leaves
+    more of the cluster to the gateway under test (ADR 0020).
+
+    .NET: no equivalent; asyncio's event loop is swappable, and uvloop is one written in C.
+    """
+    try:
+        import uvloop
+    except ImportError:
+        return asyncio.run
+    return uvloop.run
 
 
 def merge_steps(records: list[dict]) -> list[dict]:

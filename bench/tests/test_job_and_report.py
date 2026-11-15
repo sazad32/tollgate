@@ -72,6 +72,7 @@ def test_a_load_run_has_one_job_per_node_sharing_one_load_all_starting_together(
         assert job["metadata"]["labels"]["app.kubernetes.io/instance"] == "load-1"
         assert spec["template"]["metadata"]["labels"]["app.kubernetes.io/instance"] == "load-1"
         [container] = spec["template"]["spec"]["containers"]
+        assert "uvloop==0.23.0" in container["command"]  # a cheaper client (fast_runner)
         args = container["args"]
         assert args[:2] == ["-m", "tollgate_bench"]
         assert args[args.index("--pods") + 1] == "7"  # each pod sends 1/7 of every step
