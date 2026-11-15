@@ -14,6 +14,7 @@ import httpx
 
 from tollgate_gateway.backends import LoadTracker
 from tollgate_gateway.config import Settings
+from tollgate_gateway.netio import AsyncioTransport
 
 log = logging.getLogger("tollgate.gateway.upstream")
 
@@ -63,6 +64,11 @@ def make_clients(
     if settings.upstream_api_key is not None:
         headers["Authorization"] = f"Bearer {settings.upstream_api_key.get_secret_value()}"
     per_pool = max(1, math.ceil(settings.max_upstream_connections / settings.upstream_pools))
+    limits = httpx.Limits(
+        max_connections=per_pool,
+        max_keepalive_connections=per_pool,
+        keepalive_expiry=settings.upstream_keepalive_expiry_s,
+    )
     clients = [
         httpx.AsyncClient(
             headers=headers,
@@ -72,13 +78,7 @@ def make_clients(
                 write=10.0,
                 pool=10.0,
             ),
-            limits=httpx.Limits(
-                max_connections=per_pool,
-                max_keepalive_connections=per_pool,
-                keepalive_expiry=settings.upstream_keepalive_expiry_s,
-            ),
-            verify=_tls(),
-            transport=transport,
+            transport=transport or AsyncioTransport(verify=_tls(), limits=limits),
         )
         for _ in range(settings.upstream_pools)
     ]
