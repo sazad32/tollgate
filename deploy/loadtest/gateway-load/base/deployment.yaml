@@ -4,12 +4,13 @@
 # doesn't select these pods (another name label).
 # Usage events go to the real stream and ledger as tenant `loadtest`, model `mock-model` (priced at
 # 0.00 in deploy/billing/prices.toml), so billing's throughput is part of the test.
+# The pod template only: ../node-1 and ../node-2 make one Deployment per node from it, with that
+# node's number of gateway processes (one per pod).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tollgate-gateway-load
 spec:
-  replicas: 1 # one first, to find what one replica holds; then 2, as in production
   selector:
     matchLabels:
       app.kubernetes.io/name: tollgate-gateway-load
@@ -20,17 +21,6 @@ spec:
         app.kubernetes.io/component: gateway
         app.kubernetes.io/part-of: tollgate
     spec:
-      # The first replica on node-2, away from the mock and the load clients on node-1, so its CPU
-      # is its own. A second replica may land anywhere.
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values: ["vps-node-2"]
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
       securityContext:
@@ -42,7 +32,7 @@ spec:
       containers:
         - name: gateway
           # Keep in step with deploy/gateway/deployment.yaml.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-92e3862@sha256:506a1cfa2178ed865fa5b2b37a51474032cac32470ebe7f861c1e607c6efc81d
+          image: ghcr.io/sazad32/tollgate-gateway:sha-d9658d5@sha256:861575b15e8449831b79bc58aa707cc78926e4139db6ce7b7db39c226e08d4a3
           ports:
             - name: http
               containerPort: 8000
@@ -89,15 +79,3 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: tollgate-gateway-load
-spec:
-  selector:
-    app.kubernetes.io/name: tollgate-gateway-load
-  ports:
-    - name: http
-      port: 8000
-      targetPort: http

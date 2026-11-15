@@ -1,0 +1,15 @@
+# The load gateway's Service. Local: a client pod reaches only gateway pods on its own node, so
+# the link between the nodes (a few ms per round trip, tens of ms at worst) isn't counted as the
+# gateway's (ADR 0019, amended in week 15). Each node needs a gateway pod, or its clients get none.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tollgate-gateway-load
+spec:
+  selector:
+    app.kubernetes.io/name: tollgate-gateway-load
+  internalTrafficPolicy: Local
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

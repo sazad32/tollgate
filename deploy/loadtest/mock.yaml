@@ -3,12 +3,14 @@
 # a load test measures the gateway. Runs bench/src/tollgate_bench/mock.py from the bench-client
 # ConfigMap on uv's image (no image to build), with several uvicorn worker processes, so the mock is
 # never the thing that breaks: check that first with a run straight at it (bench/README.md).
+# One per node, reached only from that node (the Service's internalTrafficPolicy: Local), like the
+# load gateway: a request never crosses between the nodes (ADR 0019, amended in week 15).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tollgate-mock
 spec:
-  replicas: 1
+  replicas: 2 # one per node
   selector:
     matchLabels:
       app.kubernetes.io/name: tollgate-mock
@@ -18,8 +20,13 @@ spec:
         app.kubernetes.io/name: tollgate-mock
         app.kubernetes.io/component: loadtest
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: vps-node-1 # 8 cores; the gateway under test runs on node-2
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tollgate-mock
+              topologyKey: kubernetes.io/hostname
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -78,6 +85,7 @@ metadata:
 spec:
   selector:
     app.kubernetes.io/name: tollgate-mock
+  internalTrafficPolicy: Local
   ports:
     - name: http
       port: 8080
