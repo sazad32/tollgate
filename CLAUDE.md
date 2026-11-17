@@ -95,12 +95,24 @@ Python is a uv workspace at the repo root. Each package has `src/` layout and it
   counter skips cached tokens, so input isn't compared); fails on a gap (KubeJobFailed). No automatic
   corrections. Traffic straight to a model server (benchmarks, port-forwards) shows up as a gap.
   `tollgate_bench metering` + `tollgate_billing check-requests` audit requests one by one.
-- Load tests (ADR 0019): `deploy/loadtest` (applied by hand, deleted after): fake model server `tollgate-mock`
-  (bench `mock.py`, 4 uvicorn workers) + `tollgate-gateway-load`; tenant `loadtest` (tier `loadtest`), key in
-  the hand-made `loadtest-key` Secret; `mock-model` priced 0.00. Clients: `tollgate_bench load-job` (Indexed
-  Job, ~150 streams per pod: one client process fills a core at ~250-300). Gateway metrics at `/metrics`
-  (PodMonitor `tollgate-gateways`). Targets (the Phase 4 gate): 1,000 streams on 2 replicas, gateway adds
-  <= 50 ms p99 first token and <= 10 ms p99 token gap, no errors. Week 14: 2 replicas hold 250 streams.
+- Gateway under load (ADR 0020): 16 upstream pools (`TOLLGATE_UPSTREAM_POOLS`); upstream sockets
+  through `netio.py` (plain asyncio under httpx; it replaces httpx's private `_pool`, and
+  `test_netio.py` guards that); a blocking Redis pool (500, 0.5 s wait), fail-opens counted in
+  `tollgate_gateway_redis_fail_open_total{step}`; `TOLLGATE_MAX_IN_FLIGHT` (503 past it; unset in
+  production); uvicorn on uvloop + httptools, keep-alive 65 s; backend URLs fully qualified with a
+  trailing dot; memory limit 512 MiB. In the cluster one gateway process holds the latency targets
+  to about 100 streams.
+- Load tests (ADR 0019, 0020): `deploy/loadtest` (applied by hand, deleted after), node-local: each
+  request stays on its node (Services with `internalTrafficPolicy: Local`), because the link between
+  the nodes is slow (~4 ms per round trip, up to tens of ms). A fake model server `tollgate-mock` per
+  node (bench `mock.py`, 4 uvicorn workers) + `tollgate-gateway-load` as 7 single-process pods (5 on
+  node-1, 2 on node-2, 300 streams each at most); tenant `loadtest` (tier `loadtest`), key in the
+  hand-made `loadtest-key` Secret; `mock-model` priced 0.00. Clients: `tollgate_bench load-job`
+  (one Indexed Job per node, `--nodes`, default 5 + 2 pods; label `app.kubernetes.io/instance=<name>`).
+  Gateway metrics at `/metrics` (PodMonitor `tollgate-gateways`). Targets (the Phase 4 gate): 1,000
+  streams, gateway adds <= 50 ms p99 first token and <= 10 ms p99 token gap, no errors. Week 15:
+  token gaps in target to 500-750 streams; first token not (3 Redis round trips before it, across
+  the link for node-1's gateways); 1,000 streams don't fit beside the rig. Gate not met yet.
 
 ## Rules
 1. **Never commit secrets.** Config via env vars and Kubernetes Secrets. Ship `.env.example` only.
