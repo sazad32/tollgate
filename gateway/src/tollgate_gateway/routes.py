@@ -27,7 +27,13 @@ from tollgate_gateway.hosted import (
     unsupported_reason,
 )
 from tollgate_gateway.limits import estimate_tokens, prompt_estimate
-from tollgate_gateway.ratelimit import StreamMeter, limit_headers, rate_limited, reserve
+from tollgate_gateway.ratelimit import (
+    Reservation,
+    StreamMeter,
+    limit_headers,
+    rate_limited,
+    reserve,
+)
 from tollgate_gateway.router import Route, choose_route, local_order
 from tollgate_gateway.upstream import open_local
 from tollgate_gateway.usage import RequestUsage, Status, Tokens, tokens_from_body
@@ -103,10 +109,34 @@ async def chat_completions(request: Request) -> Response:
         where = ".".join(str(part) for part in first["loc"]) or "body"
         return openai_error(400, f"{where}: {first['msg']}", "invalid_request_error")
 
-    # 1. Reserve the estimate (ADR 0012). None: no limits applied (not configured, or Redis down).
     settings = request.app.state.settings
     tenant = principal.tenant
     metrics = request.app.state.metrics
+    loads: LoadTracker = request.app.state.loads
+    hosted: HostedModel | None = request.app.state.hosted
+    admission: Admission | None = request.app.state.admission
+
+    def route_now() -> Route:
+        return choose_route(
+            loads.snapshot(),
+            wants_hosted=chat.model == settings.hosted_model,
+            allows_hosted=tenant.allows_hosted,
+            hosted_configured=hosted is not None,
+            hosted_unsupported=unsupported_reason(payload) if tenant.allows_hosted else None,
+        )
+
+    # 1. Route (ADR 0013). In memory, with no Redis call, so it goes first: it decides which Redis
+    # calls follow, and a request it turns away needs none.
+    route = route_now()
+    if route.kind == "refused":
+        return route_refused(route)
+
+    # 2. Local, with the fair queue (ADR 0014, 0021): reserve the estimate, join the queue and take
+    # a free slot, all in one Redis call. Without a free slot, the request waits its turn.
+    if route.kind == "local" and admission is not None:
+        return await admit_local(request, admission, route, payload, chat, started_at)
+
+    # 3. Hosted, or local without the queue: reserve the estimate (ADR 0012).
     with metrics.timed("rate_limit"):
         reservation = await reserve(
             request.app.state.buckets, tenant.id, settings.limit_for(tenant.tier), payload
@@ -116,50 +146,104 @@ async def chat_completions(request: Request) -> Response:
     if reservation is not None and not reservation.decision.allowed:
         return rate_limited(reservation)
     headers = limit_headers(reservation.decision) if reservation else {}
-    # From here the request ends in exactly one of: usage.record() (a model ran: settle with the
-    # real count, emit the usage event, ADR 0015) or usage.refund() (no model ran: no event).
-    usage = RequestUsage(
+    usage = request_usage(request, reservation, chat, started_at)
+
+    if route.kind == "local":
+        # Local without the queue: route again. Choosing a backend and counting the request
+        # against it (open_local) must happen with no await in between, so concurrent requests
+        # never decide on the same snapshot, and the reservation just awaited Redis.
+        route = route_now()
+        if route.kind == "refused":  # every backend went down while it reserved: rare
+            await usage.refund()
+            response = route_refused(route)
+            response.headers.update(headers)
+            return response
+    if route.kind == "hosted":
+        assert hosted is not None  # the router only says "hosted" when it is configured
+        log.info("request %s: %s -> hosted (%s)", request_id, tenant.id, route.reason)
+        return await forward_hosted(hosted, principal, payload, chat, request_id, usage, headers)
+    try:
+        return await forward_local(request, route, payload, chat, usage, headers)
+    except BaseException:
+        # A safety net: forward_local records usage on every path it knows.
+        with anyio.CancelScope(shield=True):
+            await usage.refund()
+        raise
+
+
+def route_refused(route: Route) -> Response:
+    type_ = "upstream_error" if route.status >= 500 else "invalid_request_error"
+    return openai_error(route.status, route.message, type_, route.code)
+
+
+def request_usage(
+    request: Request,
+    reservation: Reservation | None,
+    chat: "ChatCompletionRequest",
+    started_at: float,
+) -> RequestUsage:
+    """From here the request ends in exactly one of: usage.record() (a model ran: settle with the
+    real count, emit the usage event, ADR 0015) or usage.refund() (no model ran: no event)."""
+    principal: Principal = request.state.principal
+    return RequestUsage(
         reservation=reservation,
         emitter=request.app.state.usage,
-        request_id=request_id,
-        tenant_id=tenant.id,
+        request_id=request.state.request_id,
+        tenant_id=principal.tenant.id,
         credential=credential(principal),
         stream=chat.stream,
         started_at=started_at,
         clock=request.app.state.clock,
     )
 
-    # 2. Route (ADR 0013). Choosing a backend and counting the request against it (open_local)
-    # happen with no await in between, so concurrent requests never decide on the same snapshot.
+
+async def admit_local(
+    request: Request,
+    admission: Admission,
+    route: Route,
+    payload: dict,
+    chat: "ChatCompletionRequest",
+    started_at: float,
+) -> Response:
+    """A local request with the fair queue on (ADR 0014, 0021). One Redis call reserves the
+    estimate, joins the tenant's queue and takes a free slot if it's this request's turn. If
+    there's no free slot, it waits its turn, polling, as before."""
+    request_id: str = request.state.request_id
+    tenant = request.state.principal.tenant
+    settings = request.app.state.settings
+    metrics = request.app.state.metrics
     loads: LoadTracker = request.app.state.loads
-    hosted: HostedModel | None = request.app.state.hosted
-    route = choose_route(
-        loads.snapshot(),
-        wants_hosted=chat.model == settings.hosted_model,
-        allows_hosted=tenant.allows_hosted,
-        hosted_configured=hosted is not None,
-        hosted_unsupported=unsupported_reason(payload) if tenant.allows_hosted else None,
-    )
-    if route.kind == "refused":
-        await usage.refund()
-        type_ = "upstream_error" if route.status >= 500 else "invalid_request_error"
-        response = openai_error(route.status, route.message, type_, route.code)
-        response.headers.update(headers)
-        return response
+    limit = settings.limit_for(tenant.tier)
+    estimate = estimate_tokens(payload)
 
-    # 3. Forward, and record usage when the request ends.
-    if route.kind == "hosted":
-        assert hosted is not None  # the router only says "hosted" when it is configured
-        log.info("request %s: %s -> hosted (%s)", request_id, tenant.id, route.reason)
-        return await forward_hosted(hosted, principal, payload, chat, request_id, usage, headers)
+    with metrics.timed("admit"):
+        first = await admission.first_trip(
+            tenant.id, request_id, limit, estimate, loads.available()
+        )
+    if first is None:  # Redis failed: no limit and no queue (fail open, counted by Admission)
+        reservation, headers = None, {}
+    else:
+        reservation = Reservation(
+            request.app.state.buckets, tenant.id, first.decision, estimate, prompt_estimate(payload)
+        )
+        if first.outcome == "limited":
+            return rate_limited(reservation)
+        headers = limit_headers(first.decision)
+        if first.outcome == "queue_full":
+            assert first.joined is not None
+            # Its estimate already went back into the bucket, in the same call: nothing to refund.
+            response = queue_refused(admission.full_queue(first.joined, loads.available()))
+            response.headers.update(headers)
+            return response
+    usage = request_usage(request, reservation, chat, started_at)
 
-    # 4. Local: wait for a fair turn at a slot (ADR 0014). The queue says which backend the slot
-    # is on; the others stay in the order as failover.
-    ticket: Ticket | None = None
-    admission: Admission | None = request.app.state.admission
-    if admission is not None:
+    if first is None:
+        ticket = admission.open_ticket(tenant.id, request_id)
+    elif first.outcome == "start":
+        ticket = admission.ticket(tenant.id, request_id, first.backend)
+    else:  # "wait": in the queue, with its reservation
         with metrics.timed("queue"):
-            outcome = await admission.wait_for_slot(
+            outcome = await admission.wait_turn(
                 tenant.id, request_id, loads.available, request.is_disconnected
             )
         if not isinstance(outcome, Ticket):
@@ -170,17 +254,18 @@ async def chat_completions(request: Request) -> Response:
             response.headers.update(headers)
             return response
         ticket = outcome
-        order = local_order(loads.snapshot()) or route.backends
-        if ticket.backend:
-            order = (ticket.backend, *(name for name in order if name != ticket.backend))
-        route = Route("local", route.reason, order)
+
+    # The queue says which backend the slot is on; the others stay in the order as failover.
+    order = local_order(loads.snapshot()) or route.backends
+    if ticket.backend:
+        order = (ticket.backend, *(name for name in order if name != ticket.backend))
+    route = Route("local", route.reason, order)
     try:
         return await forward_local(request, route, payload, chat, usage, headers, ticket)
     except BaseException:
         # A safety net: forward_local releases the slot and records usage on every path it knows.
         with anyio.CancelScope(shield=True):
-            if ticket is not None:
-                await ticket.release()
+            await ticket.release()
             await usage.refund()
         raise
 

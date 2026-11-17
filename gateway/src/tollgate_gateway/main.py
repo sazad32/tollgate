@@ -172,6 +172,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             queue, app.state.clock, max_wait_s=settings.queue_max_wait_s,
             poll_s=settings.queue_poll_s,
             on_fail_open=lambda step: fail_open.labels(step=step).inc(),
+            buckets=app.state.buckets,  # reserve, join and start in one call (ADR 0021)
         )  # fmt: skip
         renewals = asyncio.create_task(app.state.admission.run_renewals())
     # Usage events for billing (ADR 0015), in the same Redis. The request path only appends to

@@ -42,8 +42,12 @@ async def test_a_completed_request_is_counted_and_timed(client, chat) -> None:
     assert sample(text, "tollgate_gateway_request_seconds_count") == 1
     assert sample(text, "tollgate_gateway_time_to_first_byte_seconds_count") == 1
     assert sample(text, "tollgate_gateway_requests_in_flight") == 0
-    for stage in ("auth", "rate_limit", "queue", "upstream_headers"):
+    # A local request with a free slot: reserve, join the queue and start are one step, "admit"
+    # (ADR 0021). "rate_limit" is the hosted path's; "queue" is time spent waiting after "admit".
+    for stage in ("auth", "admit", "upstream_headers"):
         assert sample(text, "tollgate_gateway_stage_seconds_count", stage=stage) == 1, stage
+    for stage in ("rate_limit", "queue"):
+        assert sample(text, "tollgate_gateway_stage_seconds_count", stage=stage) is None, stage
 
 
 async def test_a_refused_request_is_counted_with_its_status(anonymous, chat) -> None:
