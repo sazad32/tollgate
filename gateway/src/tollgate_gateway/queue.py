@@ -32,126 +32,152 @@ from dataclasses import dataclass
 
 from redis.asyncio import Redis
 
-# Shared by every script: drop members whose lease ran out (their gateway replica is gone).
-_PRUNE = """
-local running, waiting, leases, backend_of = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
-local now = tonumber(ARGV[1])
-local function prune()
-  for _, m in ipairs(redis.call('ZRANGEBYSCORE', leases, '-inf', now)) do
-    redis.call('ZREM', running, m)
-    redis.call('ZREM', waiting, m)
-    redis.call('ZREM', leases, m)
-    redis.call('HDEL', backend_of, m)
+# The queue, as Lua functions: shared by JOIN, TRY_START and STATE below, and by ADMIT (admit.py),
+# which reserves and joins in one call. They take the queue's keys as a table, `q`, rather than
+# reading KEYS, so each script passes its own.
+QUEUE_LUA = """
+-- The queue's keys, from KEYS[first] on: running, waiting, leases, backend, arrivals.
+local function queue_keys(first)
+  return {running = KEYS[first], waiting = KEYS[first + 1], leases = KEYS[first + 2],
+          backend_of = KEYS[first + 3], arrivals = KEYS[first + 4]}
+end
+
+local function tenant_of(m) return string.match(m, '^(%S+) ') end
+
+-- Drop members whose lease ran out (their gateway replica is gone).
+local function prune(q, now)
+  for _, m in ipairs(redis.call('ZRANGEBYSCORE', q.leases, '-inf', now)) do
+    redis.call('ZREM', q.running, m)
+    redis.call('ZREM', q.waiting, m)
+    redis.call('ZREM', q.leases, m)
+    redis.call('HDEL', q.backend_of, m)
   end
 end
-local function tenant_of(m) return string.match(m, '^(%S+) ') end
+
+-- Join the waiting line, unless this member's tenant already has max_waiting there.
+-- -> {accepted (0/1), this tenant's waiting, everyone's waiting, running}
+local function join(q, member, expiry, max_waiting)
+  local tenant = tenant_of(member)
+  local all = redis.call('ZRANGE', q.waiting, 0, -1)
+  local mine = 0
+  for _, m in ipairs(all) do
+    if tenant_of(m) == tenant then mine = mine + 1 end
+  end
+  local busy = redis.call('ZCARD', q.running)
+  if mine >= max_waiting then
+    return {0, mine, #all, busy}
+  end
+  redis.call('ZADD', q.waiting, redis.call('INCR', q.arrivals), member)
+  redis.call('ZADD', q.leases, expiry, member)
+  return {1, mine + 1, #all + 1, busy}
+end
+
+-- The backends that are up, from ARGV[first] on as triples: name, slots, priority.
+-- -> names, slots by name, priority by name
+local function backends_from(first)
+  local names, slots, priority = {}, {}, {}
+  for i = first, #ARGV, 3 do
+    local n = ARGV[i]
+    table.insert(names, n)
+    slots[n], priority[n] = tonumber(ARGV[i + 1]), tonumber(ARGV[i + 2])
+  end
+  return names, slots, priority
+end
+
+-- Start this waiting member if a slot is free and it's its turn. `started` is the running score
+-- (now, as the caller sent it).
+-- -> {'start', backend} | {'wait', ''} | {'gone', ''}
+local function try_start(q, started, member, expiry, names, slots, priority)
+  if not redis.call('ZSCORE', q.waiting, member) then
+    if redis.call('ZSCORE', q.running, member) then
+      return {'start', redis.call('HGET', q.backend_of, member) or ''}
+    end
+    return {'gone', ''}  -- its lease ran out, or it left
+  end
+
+  -- What runs where: per backend, and per tenant.
+  local on, count = {}, {}
+  for _, m in ipairs(redis.call('ZRANGE', q.running, 0, -1)) do
+    local t = tenant_of(m)
+    count[t] = (count[t] or 0) + 1
+    local b = redis.call('HGET', q.backend_of, m)
+    if b then on[b] = (on[b] or 0) + 1 end
+  end
+  local free = 0
+  for _, n in ipairs(names) do free = free + math.max(0, slots[n] - (on[n] or 0)) end
+  if free <= 0 then return {'wait', ''} end
+
+  -- Each tenant's waiting requests, in arrival order.
+  local queues, tenants = {}, {}
+  local all = redis.call('ZRANGE', q.waiting, 0, -1, 'WITHSCORES')
+  for i = 1, #all, 2 do
+    local m, arrival = all[i], tonumber(all[i + 1])
+    local t = tenant_of(m)
+    if not queues[t] then
+      queues[t] = {}
+      table.insert(tenants, t)
+    end
+    table.insert(queues[t], {m, arrival})
+  end
+  local head = {}
+  for _, t in ipairs(tenants) do head[t] = 1 end
+
+  -- Hand out the free slots one by one. If this member would get one, it starts now.
+  for _ = 1, free do
+    local best, best_count, best_arrival = nil, nil, nil
+    for _, t in ipairs(tenants) do
+      local next_up = queues[t][head[t]]
+      if next_up then
+        local c = count[t] or 0
+        if best == nil or c < best_count or (c == best_count and next_up[2] < best_arrival) then
+          best, best_count, best_arrival = t, c, next_up[2]
+        end
+      end
+    end
+    if best == nil then break end
+    if queues[best][head[best]][1] == member then
+      -- Its slot: a backend with room, the preferred kind first, then the one with most room.
+      local pick, pick_free = nil, nil
+      for _, n in ipairs(names) do
+        local f = slots[n] - (on[n] or 0)
+        if f > 0 and (pick == nil or priority[n] < priority[pick]
+            or (priority[n] == priority[pick] and (f > pick_free or (f == pick_free and n < pick))))
+        then
+          pick, pick_free = n, f
+        end
+      end
+      redis.call('ZREM', q.waiting, member)
+      redis.call('ZADD', q.running, started, member)
+      redis.call('ZADD', q.leases, expiry, member)
+      redis.call('HSET', q.backend_of, member, pick)
+      return {'start', pick}
+    end
+    head[best] = head[best] + 1
+    count[best] = best_count + 1
+  end
+  return {'wait', ''}
+end
 """
 
-# ARGV: now, member, lease expiry, max waiting per tenant
+# KEYS: the queue's five keys. ARGV: now, member, lease expiry, max waiting per tenant
 # -> {accepted (0/1), this tenant's waiting, everyone's waiting, running}
 JOIN = (
-    _PRUNE
+    QUEUE_LUA
     + """
-prune()
-local member, expiry, max_waiting = ARGV[2], ARGV[3], tonumber(ARGV[4])
-local tenant = tenant_of(member)
-local all = redis.call('ZRANGE', waiting, 0, -1)
-local mine = 0
-for _, m in ipairs(all) do
-  if tenant_of(m) == tenant then mine = mine + 1 end
-end
-local busy = redis.call('ZCARD', running)
-if mine >= max_waiting then
-  return {0, mine, #all, busy}
-end
-redis.call('ZADD', waiting, redis.call('INCR', KEYS[5]), member)
-redis.call('ZADD', leases, expiry, member)
-return {1, mine + 1, #all + 1, busy}
+local q = queue_keys(1)
+prune(q, tonumber(ARGV[1]))
+return join(q, ARGV[2], ARGV[3], tonumber(ARGV[4]))
 """
 )
 
-# ARGV: now, member, lease expiry, then the backends that are up as triples: name, slots, priority
-# -> {'start', backend} | {'wait', ''} | {'gone', ''}
+# KEYS: the queue's five keys. ARGV: now, member, lease expiry, then the backends that are up as
+# triples: name, slots, priority -> {'start', backend} | {'wait', ''} | {'gone', ''}
 TRY_START = (
-    _PRUNE
+    QUEUE_LUA
     + """
-prune()
-local member, expiry = ARGV[2], ARGV[3]
-if not redis.call('ZSCORE', waiting, member) then
-  if redis.call('ZSCORE', running, member) then
-    return {'start', redis.call('HGET', backend_of, member) or ''}
-  end
-  return {'gone', ''}  -- its lease ran out, or it left
-end
-
-local names, slots, priority = {}, {}, {}
-for i = 4, #ARGV, 3 do
-  local n = ARGV[i]
-  table.insert(names, n)
-  slots[n], priority[n] = tonumber(ARGV[i + 1]), tonumber(ARGV[i + 2])
-end
-
--- What runs where: per backend, and per tenant.
-local on, count = {}, {}
-for _, m in ipairs(redis.call('ZRANGE', running, 0, -1)) do
-  local t = tenant_of(m)
-  count[t] = (count[t] or 0) + 1
-  local b = redis.call('HGET', backend_of, m)
-  if b then on[b] = (on[b] or 0) + 1 end
-end
-local free = 0
-for _, n in ipairs(names) do free = free + math.max(0, slots[n] - (on[n] or 0)) end
-if free <= 0 then return {'wait', ''} end
-
--- Each tenant's waiting requests, in arrival order.
-local queues, tenants = {}, {}
-local all = redis.call('ZRANGE', waiting, 0, -1, 'WITHSCORES')
-for i = 1, #all, 2 do
-  local m, arrival = all[i], tonumber(all[i + 1])
-  local t = tenant_of(m)
-  if not queues[t] then
-    queues[t] = {}
-    table.insert(tenants, t)
-  end
-  table.insert(queues[t], {m, arrival})
-end
-local head = {}
-for _, t in ipairs(tenants) do head[t] = 1 end
-
--- Hand out the free slots one by one. If this member would get one, it starts now.
-for _ = 1, free do
-  local best, best_count, best_arrival = nil, nil, nil
-  for _, t in ipairs(tenants) do
-    local next_up = queues[t][head[t]]
-    if next_up then
-      local c = count[t] or 0
-      if best == nil or c < best_count or (c == best_count and next_up[2] < best_arrival) then
-        best, best_count, best_arrival = t, c, next_up[2]
-      end
-    end
-  end
-  if best == nil then break end
-  if queues[best][head[best]][1] == member then
-    -- Its slot: a backend with room, the preferred kind first, then the one with most room.
-    local pick, pick_free = nil, nil
-    for _, n in ipairs(names) do
-      local f = slots[n] - (on[n] or 0)
-      if f > 0 and (pick == nil or priority[n] < priority[pick]
-          or (priority[n] == priority[pick] and (f > pick_free or (f == pick_free and n < pick))))
-      then
-        pick, pick_free = n, f
-      end
-    end
-    redis.call('ZREM', waiting, member)
-    redis.call('ZADD', running, ARGV[1], member)
-    redis.call('ZADD', leases, expiry, member)
-    redis.call('HSET', backend_of, member, pick)
-    return {'start', pick}
-  end
-  head[best] = head[best] + 1
-  count[best] = best_count + 1
-end
-return {'wait', ''}
+local q = queue_keys(1)
+prune(q, tonumber(ARGV[1]))
+return try_start(q, ARGV[1], ARGV[2], ARGV[3], backends_from(4))
 """
 )
 
@@ -168,17 +194,19 @@ for i = 2, #ARGV do redis.call('ZADD', KEYS[1], 'XX', ARGV[1], ARGV[i]) end
 return 1
 """
 
-# ARGV: now -> {running members, waiting members, the backends of the running ones}
+# KEYS: the queue's first four keys. ARGV: now
+# -> {running members, waiting members, the backends of the running ones}
 STATE = (
-    _PRUNE
+    QUEUE_LUA
     + """
-prune()
-local running_now = redis.call('ZRANGE', running, 0, -1)
+local q = queue_keys(1)
+prune(q, tonumber(ARGV[1]))
+local running_now = redis.call('ZRANGE', q.running, 0, -1)
 local backends = {}
 for _, m in ipairs(running_now) do
-  table.insert(backends, redis.call('HGET', backend_of, m) or '')
+  table.insert(backends, redis.call('HGET', q.backend_of, m) or '')
 end
-return {running_now, redis.call('ZRANGE', waiting, 0, -1), backends}
+return {running_now, redis.call('ZRANGE', q.waiting, 0, -1), backends}
 """
 )
 
