@@ -4,7 +4,7 @@
 Gotcha: values are read when Settings() is created, not on every access; restart to pick up changes.
 """
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tollgate_gateway.backends import Backend
@@ -33,7 +33,12 @@ class Settings(BaseSettings):
     # Below llama-server's 5 s keep-alive, so we never reuse a connection the server is closing
     # (the week 4 benchmark lost 6 requests to exactly that race).
     upstream_keepalive_expiry_s: float = 2.0
-    upstream_max_connections: int = 200
+    # Connections to the model servers, at most. Unset: twice the backends' slots, at least 200
+    # (more requests than slots wait in the fair queue, not here).
+    upstream_max_connections: int | None = Field(default=None, ge=1)
+    # Split across this many separate pools (ADR 0020): httpcore's bookkeeping grows with the square
+    # of one pool's size, so several small pools cost far less CPU than one big one.
+    upstream_pools: int = Field(default=16, ge=1)
 
     # --- Hosted model (ADR 0013) ------------------------------------------------------------------
     # Unset: no hosted model at all; every request stays local.
@@ -57,6 +62,15 @@ class Settings(BaseSettings):
     queue_max_wait_s: float = 120.0  # then a 429
     queue_lease_s: float = 30.0  # a dead replica's slots come back after this long
     queue_poll_s: float = 0.1  # how often a waiting request checks whether it's its turn
+
+    # --- Load (ADR 0020) --------------------------------------------------------------------------
+    # Model requests one replica serves at once; past it, a quick 503 + Retry-After instead of
+    # piling up until the pod runs out of memory. Unset: no cap.
+    max_in_flight: int | None = Field(default=None, ge=0)
+    # Redis connections, at most. Past it a call waits up to redis_pool_timeout_s for a free one,
+    # then fails (and that step fails open). redis-py's default pool has 100 and doesn't wait.
+    redis_max_connections: int = Field(default=500, ge=1)
+    redis_pool_timeout_s: float = 0.5
 
     # --- Metrics and the event loop (ADR 0019) ---------------------------------------------------
     # How often to measure event-loop lag; 0 turns it off.
@@ -91,6 +105,12 @@ class Settings(BaseSettings):
     # Tokens per minute (prompt + output) by tenant tier, as JSON in TOLLGATE_RATE_LIMITS.
     # A tier not listed here gets the "standard" limit.
     rate_limits: dict[str, int] = {"standard": 10_000}
+
+    @property
+    def max_upstream_connections(self) -> int:
+        if self.upstream_max_connections is not None:
+            return self.upstream_max_connections
+        return max(200, 2 * sum(b.slots for b in self.backends))
 
     def limit_for(self, tier: str) -> Limit:
         tokens = self.rate_limits.get(tier, self.rate_limits.get("standard", 10_000))

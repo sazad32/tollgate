@@ -2,6 +2,21 @@
 
 Newest entry at the top. Each entry: what changed, what broke, what was measured.
 
+## 2026-11-17 — Week 15: fixing the bottlenecks, measuring node-local
+- Changed: the gateway splits upstream connections across 16 small pools, waits briefly for a
+  Redis connection instead of failing open, and answers past a per-replica cap with a quick 503.
+  It runs on uvloop and httptools, with its own asyncio socket layer under httpx (`netio.py`) and
+  a shortcut in the stream meter: about 20% less CPU per token. The load test now keeps each
+  request on its node (ADR 0020). Production runs image d9658d5.
+- Broke: a bigger upstream pool made things worse, because httpcore's bookkeeping grows with the
+  square of a pool's size. Week 14's setup counted the link between the nodes as the gateway's:
+  about 4 ms per round trip, up to 36 ms, crossed twice per token. The load-test rig itself took
+  5.6 of the cluster's 12 CPUs at 1,000 streams (4.6 once made cheaper).
+- Measured: on week 14's setup, 2 replicas now hold 500 streams with 3 errors (was 18) and a
+  0.7 s p99 first token (was 112 s). Node-local, token gaps are within target up to 500–750
+  streams. First tokens are not, because of 3 Redis round trips before each one. 1,000 streams
+  don't fit the cluster beside the rig. Phase 4 gate not met yet. 520 tests pass.
+
 ## 2026-11-09 — Week 14: load tests, where async Python breaks
 - Changed: the gateway has its own `/metrics`, with stage timings and event-loop lag. A fake model
   server and an open-loop load generator now test the gateway without GPUs. The latency targets

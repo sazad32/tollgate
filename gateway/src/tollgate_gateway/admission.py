@@ -70,6 +70,8 @@ class Admission:
         poll_s: float = 0.1,
         initial_hold_s: float = 10.0,
         max_hold_s: float = 1800.0,
+        on_fail_open: Callable[[str], None] | None = None,
+        retry_release_s: float = 0.2,
     ) -> None:
         self.queue = queue
         self.clock = clock
@@ -83,6 +85,20 @@ class Admission:
         self.max_hold_s = max_hold_s
         # (tenant, request id) -> when it joined: everything waiting or running on this replica.
         self.held: dict[tuple[str, str], float] = {}
+        # Told each time Redis fails and a step goes ahead without it (the gateway's metrics).
+        self._on_fail_open = on_fail_open or (lambda step: None)
+        # Slots whose release failed, being retried (ADR 0020). Without this a slot stays taken
+        # until its lease runs out: 30 s of a GPU blocked, on a backend with 2 slots.
+        self.retry_release_s = retry_release_s
+        self._retries: set[asyncio.Task] = set()
+
+    @property
+    def pending_releases(self) -> int:
+        return len(self._retries)
+
+    def cancel_pending(self) -> None:
+        for task in self._retries:
+            task.cancel()
 
     def _open(self, tenant: str, request_id: str) -> Ticket:
         return Ticket(self, tenant, request_id, self.clock(), queued=False)
@@ -107,6 +123,7 @@ class Admission:
             joined = await self.queue.join(tenant, request_id)
         except Exception as exc:  # fail open: no queue rather than no service
             log.warning("queue skipped for %s, Redis unavailable: %r", tenant, exc)
+            self._on_fail_open("queue")
             return self._open(tenant, request_id)
         if not joined.accepted:
             wait = retry_after_s(joined.waiting_total, capacity(), self.avg_hold_s)
@@ -144,6 +161,7 @@ class Admission:
                 await asyncio.sleep(self.poll_s)
         except Exception as exc:  # Redis failed mid-wait: go ahead (fail open)
             log.warning("queue skipped for %s, Redis unavailable: %r", tenant, exc)
+            self._on_fail_open("queue")
             return self._open(tenant, request_id)
         finally:
             if not admitted:
@@ -162,8 +180,29 @@ class Admission:
     async def _leave(self, tenant: str, request_id: str) -> None:
         try:
             await self.queue.finish(tenant, request_id)
-        except Exception as exc:  # its lease runs out by itself
-            log.warning("could not leave the queue for %s: %r", request_id, exc)
+        except Exception as exc:
+            log.warning("could not leave the queue for %s, retrying: %r", request_id, exc)
+            self._on_fail_open("queue_release")
+            self._retry_leave(tenant, request_id)
+
+    def _retry_leave(self, tenant: str, request_id: str) -> None:
+        """Keep trying to free the slot, backing off, until it's freed or its lease would have
+        freed it anyway."""
+        give_up_at = self.clock() + self.queue.lease_s
+
+        async def retry() -> None:
+            delay = self.retry_release_s
+            while self.clock() < give_up_at:
+                await asyncio.sleep(delay)
+                try:
+                    await self.queue.finish(tenant, request_id)
+                    return
+                except Exception:
+                    delay = min(delay * 2, 2.0)
+
+        task = asyncio.create_task(retry())
+        self._retries.add(task)
+        task.add_done_callback(self._retries.discard)
 
     async def run_renewals(self) -> None:
         """Renew this replica's leases every third of a lease, until cancelled at shutdown."""
@@ -179,3 +218,4 @@ class Admission:
                 await self.queue.renew(list(self.held))
             except Exception as exc:
                 log.warning("could not renew queue leases: %r", exc)
+                self._on_fail_open("queue_renew")

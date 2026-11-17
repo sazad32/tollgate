@@ -37,7 +37,7 @@
 
 ## Phase 4 — Reliability and security (weeks 14–17)
 - [x] Week 14: Load tests; find where async Python breaks
-- [ ] Week 15: Fix bottlenecks; re-run benchmarks; record before/after
+- [x] Week 15: Fix bottlenecks; re-run benchmarks; record before/after (ADR 0020)
 - [ ] Week 16: Chaos drills: kill a vLLM pod mid-stream, take a node offline, stop the billing consumer
 - [ ] Week 17: Security pass: Cloudflare Tunnel, TLS, secrets, RBAC, NetworkPolicies
 

@@ -122,3 +122,39 @@ def test_steps_from_several_pods_merge_into_one_row() -> None:
     assert row["rate_per_s"] == pytest.approx(4.0)
     assert row["ttft_p50_s"] == pytest.approx(0.3, abs=0.01)
     assert row["max_in_flight"] == 100
+
+
+@pytest.mark.asyncio
+async def test_streams_are_spread_over_several_small_pools() -> None:
+    # One big httpx pool costs CPU with the square of its size (ADR 0020): the client would be
+    # the bottleneck long before the gateway.
+    from tollgate_bench.load import CLIENT_POOLS, make_clients
+
+    clients = make_clients()
+    try:
+        assert len(clients) == CLIENT_POOLS == 16
+        assert len({id(c) for c in clients}) == 16
+    finally:
+        for c in clients:
+            await c.aclose()
+
+
+# --- the client's event loop ----------------------------------------------------------------------
+
+
+def test_the_client_runs_on_uvloop_when_it_is_installed(monkeypatch) -> None:
+    # A client process fills a core well before the gateway does; uvloop makes it cheaper, so the
+    # load-test rig leaves more of the cluster to the gateway (ADR 0020). The load Job installs it.
+    import asyncio
+    import sys
+    import types
+
+    from tollgate_bench.load import fast_runner
+
+    fake = types.ModuleType("uvloop")
+    fake.run = lambda coro: "ran on uvloop"
+    monkeypatch.setitem(sys.modules, "uvloop", fake)
+    assert fast_runner() is fake.run
+
+    monkeypatch.setitem(sys.modules, "uvloop", None)  # not installed (Windows, say): asyncio's own
+    assert fast_runner() is asyncio.run

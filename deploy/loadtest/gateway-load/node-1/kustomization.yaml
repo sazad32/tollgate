@@ -1,0 +1,23 @@
+# The load gateway's pods on vps-node-1: 5 of them, one gateway process each. Requests
+# from clients on this node stay on it (internalTrafficPolicy: Local, ../service.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+nameSuffix: -node-1
+labels:
+  - pairs:
+      app.kubernetes.io/instance: tollgate-gateway-load-node-1
+    includeSelectors: true # the two Deployments' pods must not overlap
+patches:
+  - target:
+      kind: Deployment
+      name: tollgate-gateway-load
+    patch: |
+      - op: add
+        path: /spec/replicas
+        value: 5
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          kubernetes.io/hostname: vps-node-1

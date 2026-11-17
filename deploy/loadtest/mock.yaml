@@ -3,12 +3,14 @@
 # a load test measures the gateway. Runs bench/src/tollgate_bench/mock.py from the bench-client
 # ConfigMap on uv's image (no image to build), with several uvicorn worker processes, so the mock is
 # never the thing that breaks: check that first with a run straight at it (bench/README.md).
+# One per node, reached only from that node (the Service's internalTrafficPolicy: Local), like the
+# load gateway: a request never crosses between the nodes (ADR 0019, amended in week 15).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tollgate-mock
 spec:
-  replicas: 1
+  replicas: 2 # one per node
   selector:
     matchLabels:
       app.kubernetes.io/name: tollgate-mock
@@ -18,8 +20,13 @@ spec:
         app.kubernetes.io/name: tollgate-mock
         app.kubernetes.io/component: loadtest
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: vps-node-1 # 8 cores; the gateway under test runs on node-2
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tollgate-mock
+              topologyKey: kubernetes.io/hostname
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -30,9 +37,13 @@ spec:
         - name: mock
           # The bench Job's image (bench/src/tollgate_bench/job.py).
           image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
-          command: ["uv", "run", "--no-project", "--with", "uvicorn==0.54.0", "python", "-m", "uvicorn"]
+          # uvloop and httptools as in the gateway (versions as in uv.lock): without them uvicorn
+          # parses HTTP in pure Python, and at 1,000 streams the mock alone took 1.7 cores (ADR 0020).
+          command: ["uv", "run", "--no-project", "--with", "uvicorn==0.54.0", "--with", "uvloop==0.23.0",
+                    "--with", "httptools==0.9.0", "python", "-m", "uvicorn"]
           args: ["tollgate_bench.mock:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080",
-                 "--workers", "4", "--log-level", "warning", "--no-access-log"]
+                 "--workers", "4", "--loop", "uvloop", "--http", "httptools", "--log-level", "warning",
+                 "--no-access-log"]
           env:
             - name: PYTHONPATH
               value: /app
@@ -78,6 +89,7 @@ metadata:
 spec:
   selector:
     app.kubernetes.io/name: tollgate-mock
+  internalTrafficPolicy: Local
   ports:
     - name: http
       port: 8080

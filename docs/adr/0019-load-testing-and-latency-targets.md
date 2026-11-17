@@ -1,6 +1,6 @@
 # 0019 — Load testing the gateway: a fake model server, an open-loop client, targets set first
 
-- Status: accepted
+- Status: accepted; amended by ADR 0020 (measured node-local: no request crosses between the nodes)
 - Date: 2026-11-09
 
 ## Context
@@ -46,6 +46,13 @@ the gateway itself under load:
 
   "Adds" means the percentile through the gateway minus the same percentile straight to the fake
   server, with the same clients and the same step.
+
+  *Amended by ADR 0020:* both runs are **node-local**. Every request stays on one node, from
+  client to gateway to fake server, and the link between the nodes is reported on its own. In
+  week 15 that link turned out to be slow and jittery (about 4 ms per round trip, up to tens of
+  ms; 0.3 ms within a node). With the setup below, every token crossed it twice through the
+  gateway and never straight to the fake server, so the link counted as the gateway's. The
+  numbers above are unchanged.
 - **The fake model server** is `tollgate_bench mock`.
   - It is a bare ASGI app under 4 uvicorn workers, and OpenAI-compatible.
   - It answers with exactly `max_tokens` tokens: the first after 100 ms, the rest at 20 a second
@@ -61,7 +68,9 @@ the gateway itself under load:
   - `load-job` runs it as an Indexed Job, every pod starting at the same moment, at about **150
     streams per client pod**. That figure was measured: one client process fills one core at
     around 250–300 streams of 20 tokens a second.
-- **The test setup**, `deploy/loadtest`, applied by hand and deleted after:
+- **The test setup**, `deploy/loadtest`, applied by hand and deleted after. (*Amended by ADR
+  0020:* a fake server and gateway pods on each node, behind Services with
+  `internalTrafficPolicy: Local`, and client pods on each node: 5 on node-1, 2 on node-2.)
   - the fake server, on node-1 with the clients;
   - `tollgate-gateway-load` on node-2, with the production gateway's resources. Its backend is the
     fake server with 5,000 slots, so the fair queue still runs in Redis on every request but never

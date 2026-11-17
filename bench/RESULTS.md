@@ -267,3 +267,112 @@ of open streams for 45 s.
 
 To run it again (bench/README.md, "Load test"): apply `deploy/loadtest`, then run `load-job` for
 the fake server alone and for the gateway, and `load-report` on the logs.
+
+## Fixes, before and after (week 15, Phase 4)
+
+Measured 2026-11-12 to 2026-11-15, with the same fake server and the same steps as week 14 (256
+tokens per request at 20 a second, 45 s per step). ADR 0020 has the fixes and why.
+
+**Same setup as week 14:** clients and fake server on node-1, gateway on node-2. Two replicas,
+after the pool, Redis, backpressure, uvloop and httptools fixes, but before netio and the meter
+shortcut. Each replica takes at most 300 streams (`TOLLGATE_MAX_IN_FLIGHT`).
+
+| Run | Streams | Starts/s | OK / sent | Errors | First token p50 / p99 | Token gap p50 / p99 / p99.9 | Max open | Client late |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| client -> mock | 250 | 19.5 | 882 / 882 | – | 110 / 120 | 51 / 52 / 52 | 259 | 0 starts, lag 112 ms |
+| client -> mock | 500 | 38.9 | 1,757 / 1,757 | – | 110 / 120 | 50 / 52 / 57 | 504 | 0 starts, lag 48 ms |
+| client -> mock | 1,000 | 77.8 | 3,507 / 3,507 | – | 110 / 140 | 50 / 57 / 88 | 1,008 | 0 starts, lag 29 ms |
+| 2 replicas, fixes, cap 300 | 100 | 7.8 | 357 / 357 | – | 150 / 520 | 51 / 75 / 120 | 105 | 0 starts, lag 105 ms |
+| 2 replicas, fixes, cap 300 | 250 | 19.5 | 882 / 882 | – | 150 / 250 | 50 / 81 / 160 | 259 | 0 starts, lag 29 ms |
+| 2 replicas, fixes, cap 300 | 500 | 38.9 | 1,754 / 1,757 | HTTP 504 ×3 | 250 / 720 | 47 / 300 / 430 | 533 | 0 starts, lag 32 ms |
+| 2 replicas, fixes, cap 300 | 1,000 | 77.8 | 2,064 / 3,507 | HTTP 503 ×1437, HTTP 504 ×6 | 510 / 1,700 | 47 / 340 / 490 | 659 | 0 starts, lag 47 ms |
+
+Against week 14's 2 replicas: at 250 streams the gateway adds 130 ms to p99 first token (was 200)
+and 29 ms to p99 token gaps (was 37). At 500, 3 errors (was 18) and a p99 first token of 0.7 s
+(was 112 s). At 1,000, the cap turns the excess away with quick 503s; in week 14 the replicas
+ran out of memory.
+
+**The link between the nodes counted as the gateway's.** The same image (d9658d5), one replica:
+
+| Where | Streams | First token p99 | Token gap p99 |
+| --- | ---: | ---: | ---: |
+| gateway on node-2, clients and fake server on node-1 | 100 | 280 | 76 |
+| everything on node-2 | 100 | 240 | 55 |
+| straight to the fake server, on node-2 | 100 | 220 | 53 |
+| gateway on node-2, clients and fake server on node-1 | 200 | 390 | 95 |
+| everything on node-2 | 200 | 230 | 59 |
+| straight to the fake server, on node-2 | 200 | 190 | 55 |
+
+A TCP round trip between the nodes takes about 4 ms at the median, 5–13 ms at p90 and up to
+36 ms; within a node, 0.3 ms. Through the gateway every token crossed that link twice, and
+straight to the fake server never. From here on, every run is **node-local**: each request stays
+on one node, from client to gateway to fake server (ADR 0020).
+
+**Node-local:** a fake server on each node, 7 single-process gateway pods (5 on node-1, 2 on
+node-2) and 7 client pods split the same way. Image d9658d5 (netio and the meter shortcut).
+Run 1:
+
+| Run | Streams | Starts/s | OK / sent | Errors | First token p50 / p99 | Token gap p50 / p99 / p99.9 | Max open | Client late |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| client -> mock, node-local | 250 | 19.5 | 882 / 882 | – | 110 / 230 | 51 / 52 / 63 | 259 | 0 starts, lag 70 ms |
+| client -> mock, node-local | 500 | 38.9 | 1,757 / 1,757 | – | 110 / 190 | 51 / 52 / 61 | 506 | 0 starts, lag 19 ms |
+| client -> mock, node-local | 750 | 58.4 | 2,632 / 2,632 | – | 110 / 150 | 51 / 53 / 75 | 758 | 0 starts, lag 46 ms |
+| client -> mock, node-local | 1,000 | 77.8 | 3,507 / 3,507 | – | 110 / 130 | 51 / 53 / 66 | 1,008 | 0 starts, lag 29 ms |
+| gateway, 7 processes, node-local | 250 | 19.5 | 882 / 882 | – | 140 / 330 | 51 / 56 / 120 | 260 | 0 starts, lag 83 ms |
+| gateway, 7 processes, node-local | 500 | 38.9 | 1,757 / 1,757 | – | 140 / 220 | 51 / 56 / 84 | 513 | 0 starts, lag 35 ms |
+| gateway, 7 processes, node-local | 750 | 58.4 | 2,632 / 2,632 | – | 140 / 300 | 50 / 75 / 180 | 768 | 0 starts, lag 52 ms |
+| gateway, 7 processes, node-local | 1,000 | 77.8 | 3,507 / 3,507 | – | 450 / 1,400 | 51 / 140 / 230 | 1,087 | 0 starts, lag 72 ms |
+
+Run 2, with a cheaper setup (clients on uvloop; the fake server on uvloop and httptools). At 1,000
+streams the setup itself took 4.6 cores instead of 5.6:
+
+| Run | Streams | Starts/s | OK / sent | Errors | First token p50 / p99 | Token gap p50 / p99 / p99.9 | Max open | Client late |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| client -> mock, node-local | 250 | 19.5 | 882 / 882 | – | 110 / 230 | 51 / 52 / 54 | 259 | 0 starts, lag 54 ms |
+| client -> mock, node-local | 500 | 38.9 | 1,757 / 1,757 | – | 110 / 170 | 51 / 52 / 55 | 506 | 0 starts, lag 25 ms |
+| client -> mock, node-local | 750 | 58.4 | 2,632 / 2,632 | – | 110 / 120 | 51 / 52 / 57 | 757 | 0 starts, lag 6 ms |
+| client -> mock, node-local | 1,000 | 77.8 | 3,507 / 3,507 | – | 110 / 130 | 51 / 53 / 67 | 1,007 | 0 starts, lag 48 ms |
+| gateway, 7 processes, node-local | 250 | 19.5 | 882 / 882 | – | 140 / 420 | 51 / 55 / 120 | 264 | 0 starts, lag 60 ms |
+| gateway, 7 processes, node-local | 500 | 38.9 | 1,756 / 1,757 | HTTP 504 ×1 | 130 / 350 | 51 / 55 / 71 | 523 | 0 starts, lag 9 ms |
+| gateway, 7 processes, node-local | 750 | 58.4 | 2,632 / 2,632 | – | 130 / 230 | 50 / 59 / 170 | 764 | 0 starts, lag 9 ms |
+| gateway, 7 processes, node-local | 1,000 | 77.8 | 3,507 / 3,507 | – | 170 / 820 | 50 / 110 / 150 | 1,048 | 0 starts, lag 39 ms |
+
+**What the gateway adds** (its p99 minus the fake server's, same step; targets: 50 ms first token,
+10 ms token gap):
+
+| Streams | Run 1: first token / token gap | Run 2: first token / token gap |
+| ---: | ---: | ---: |
+| 250 | +100 / **+4** | +190 / **+3** |
+| 500 | **+30** / **+4** | +180 / **+3** |
+| 750 | +150 / +22 | +110 / **+7** |
+| 1,000 | +1,270 / +87 | +690 / +57 |
+
+**Inside the gateway** (its own metrics, run 2, over each step's last 30 s; timings are p99s
+across all 7 pods, CPU and memory the busiest pod's):
+
+| Streams | CPU (cores) | Memory | Event-loop lag | Key check | Redis rate limit | Fair queue | Model's headers |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 250 | 0.43 | 122 MiB | 19 ms | < 1 ms | 55 ms | 49 ms | 43 ms |
+| 500 | 0.43 | 126 MiB | 14 ms | < 1 ms | 29 ms | 49 ms | 19 ms |
+| 750 | 0.62 | 131 MiB | 7 ms | 35 ms | 24 ms | 43 ms | 24 ms |
+| 1,000 | 0.74 | 133 MiB | 223 ms | < 1 ms | 237 ms | 379 ms | 401 ms |
+
+No step failed open on Redis in either run.
+
+**What it says:**
+- **The fixes held where week 14 broke.** No pool runs dry, nothing runs out of memory, and the
+  rate limits and fair queue stay on. Errors went from hundreds to one in about 17,500 requests.
+- **Token gaps are within target up to 500 streams,** and up to 750 in run 2.
+- **First tokens are not.** Before its first token, a request makes 3 round trips to Redis:
+  reserve tokens, join the fair queue, take a slot. Redis is on node-2, so for node-1's gateways
+  (70% of the traffic) each crosses the slow link. The rate limit and the queue each take
+  25–105 ms at p99 even at 250–750 streams.
+- **1,000 streams don't fit the cluster beside the test setup.** One gateway process holds the
+  targets up to about 100 streams, at about 0.45 cores; 1,000 need about 4.5 cores of gateway on
+  top of the setup's 4.6. At 1,000, node-1 had 7.1 of its 8 CPUs busy.
+- **The Phase 4 gate is not met.** Next: one Redis round trip instead of three, and the link
+  between the nodes (ADR 0020, "Still open").
+
+To run it again (bench/README.md, "Load test"): apply `deploy/loadtest`, then run `load-job` for
+the fake server alone and for the gateway, and `load-report` on the logs. Steps 250, 500, 750 and
+1,000.

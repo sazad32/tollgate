@@ -63,6 +63,8 @@ class FakeServers:
         answer = self.answers.get(request.url.host)
         if answer is None:
             raise httpx.ConnectError("connection refused")
+        if answer == "timeout":
+            raise httpx.ReadTimeout("no answer in time")
         if isinstance(answer, int):
             return httpx.Response(answer)
         return httpx.Response(200, text=answer)
@@ -127,6 +129,38 @@ async def test_a_backend_is_back_on_the_next_good_poll(tracker, servers) -> None
     await tracker.poll_once()
     servers.answers["node-1"] = LLAMA_METRICS
 
+    await tracker.poll_once()
+
+    assert by_name(tracker)["node-1"].up
+
+
+async def test_one_poll_that_times_out_leaves_a_backend_up(tracker, servers) -> None:
+    # Under load the gateway's own event loop can make a poll late (week 14): one slow poll
+    # mustn't take a healthy backend out.
+    servers.answers["node-1"] = "timeout"
+
+    await tracker.poll_once()
+
+    assert by_name(tracker)["node-1"].up
+
+
+async def test_three_polls_in_a_row_that_time_out_take_a_backend_down(tracker, servers) -> None:
+    servers.answers["node-1"] = "timeout"
+
+    for _ in range(3):
+        await tracker.poll_once()
+
+    assert not by_name(tracker)["node-1"].up
+
+
+async def test_a_good_poll_resets_the_count_of_timeouts(tracker, servers) -> None:
+    servers.answers["node-1"] = "timeout"
+    await tracker.poll_once()
+    await tracker.poll_once()
+    servers.answers["node-1"] = LLAMA_METRICS
+    await tracker.poll_once()
+    servers.answers["node-1"] = "timeout"
+    await tracker.poll_once()
     await tracker.poll_once()
 
     assert by_name(tracker)["node-1"].up

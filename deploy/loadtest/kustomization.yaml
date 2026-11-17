@@ -11,4 +11,6 @@ labels:
       app.kubernetes.io/part-of: tollgate
 resources:
   - mock.yaml
-  - gateway-load.yaml
+  - gateway-load/service.yaml
+  - gateway-load/node-1 # 5 gateway pods
+  - gateway-load/node-2 # 2 gateway pods: node-2 has 4 cores, and Redis and Postgres

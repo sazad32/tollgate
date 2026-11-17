@@ -116,6 +116,12 @@ class StreamMeter:
 
     def feed(self, data: bytes) -> list[bytes]:
         """Complete events to pass on, in order. A partial event waits for the rest of its bytes."""
+        if (not self._buffer and data.endswith(b"\n\n") and b"\r" not in data
+                and data.find(b"\n\n") == len(data) - 2):  # fmt: skip
+            # The usual case, one whole event per read (a model server sends a token at a time):
+            # nothing to join or cut. This runs for every token, so the shortcut is worth having
+            # (ADR 0020); test_stream_meter.py checks it gives exactly what the long way does.
+            return [data] if self._inspect(data) else []
         self._buffer += data.replace(b"\r\n", b"\n")
         events = []
         while (end := self._buffer.find(b"\n\n")) >= 0:
@@ -152,10 +158,12 @@ class StreamMeter:
             if chunk.get("error"):
                 self.failed = True
             choices = chunk.get("choices") or []
-            if any((c.get("delta") or {}).get("content") for c in choices if isinstance(c, dict)):
-                self.content_chunks += 1
+            for c in choices:
+                if isinstance(c, dict) and (c.get("delta") or {}).get("content"):
+                    self.content_chunks += 1
+                    break
             usage = chunk.get("usage")
-            if usage_total(usage) is not None:
+            if usage is not None and usage_total(usage) is not None:
                 prompt = usage.get("prompt_tokens")
                 completion = usage.get("completion_tokens")
                 if isinstance(prompt, int) and isinstance(completion, int):

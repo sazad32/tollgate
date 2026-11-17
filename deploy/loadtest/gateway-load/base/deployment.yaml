@@ -4,12 +4,13 @@
 # doesn't select these pods (another name label).
 # Usage events go to the real stream and ledger as tenant `loadtest`, model `mock-model` (priced at
 # 0.00 in deploy/billing/prices.toml), so billing's throughput is part of the test.
+# The pod template only: ../node-1 and ../node-2 make one Deployment per node from it, with that
+# node's number of gateway processes (one per pod).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tollgate-gateway-load
 spec:
-  replicas: 1 # one first, to find what one replica holds; then 2, as in production
   selector:
     matchLabels:
       app.kubernetes.io/name: tollgate-gateway-load
@@ -20,17 +21,6 @@ spec:
         app.kubernetes.io/component: gateway
         app.kubernetes.io/part-of: tollgate
     spec:
-      # The first replica on node-2, away from the mock and the load clients on node-1, so its CPU
-      # is its own. A second replica may land anywhere.
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values: ["vps-node-2"]
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
       securityContext:
@@ -42,7 +32,7 @@ spec:
       containers:
         - name: gateway
           # Keep in step with deploy/gateway/deployment.yaml.
-          image: ghcr.io/sazad32/tollgate-gateway:sha-1c4d674@sha256:b7e3d58e09545212c8e28c759d3aaa1bc544b09d10eabb7889ae1e9f129f2494
+          image: ghcr.io/sazad32/tollgate-gateway:sha-d9658d5@sha256:861575b15e8449831b79bc58aa707cc78926e4139db6ce7b7db39c226e08d4a3
           ports:
             - name: http
               containerPort: 8000
@@ -52,13 +42,15 @@ spec:
                 name: gateway-auth
           env:
             - name: TOLLGATE_BACKENDS
-              value: '[{"name": "mock", "url": "http://tollgate-mock.tollgate.svc:8080", "kind": "llama", "slots": 5000, "priority": 0}]'
+              value: '[{"name": "mock", "url": "http://tollgate-mock.tollgate.svc.cluster.local.:8080", "kind": "llama", "slots": 5000, "priority": 0}]'
             - name: TOLLGATE_LOCAL_MODEL
               value: mock-model
             - name: TOLLGATE_RATE_LIMITS
               value: '{"standard": 10000, "loadtest": 1000000000}'
             - name: TOLLGATE_FAIR_QUEUE
               value: "true" # the queue still runs, in Redis, on every request; 5000 slots never fill
+            - name: TOLLGATE_MAX_IN_FLIGHT
+              value: "300" # one process saturates near 300 streams: past it, a quick 503 (ADR 0020)
             - name: TOLLGATE_REDIS_URL
               valueFrom:
                 secretKeyRef:
@@ -81,21 +73,9 @@ spec:
               cpu: 100m
               memory: 128Mi
             limits:
-              memory: 256Mi
+              memory: 512Mi # thousands of open streams fit (ADR 0020); TOLLGATE_MAX_IN_FLIGHT caps them
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: tollgate-gateway-load
-spec:
-  selector:
-    app.kubernetes.io/name: tollgate-gateway-load
-  ports:
-    - name: http
-      port: 8000
-      targetPort: http
