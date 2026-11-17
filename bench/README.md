@@ -83,31 +83,33 @@ Give `reconcile` the run's start, and an end at least 30 s after the run, so Pro
 the servers' counters once more.
 
 ## Load test
-Where the gateway itself breaks, with the GPUs out of the way (ADR 0019; results at the end of
-RESULTS.md). `deploy/loadtest` adds a fake model server and a second gateway in front of it. The
-load runs as an Indexed Job of client pods, about 150 streams each, all starting together. It needs
-the `loadtest` tenant and its key in the `loadtest-key` Secret (made once, by hand):
+Where the gateway itself breaks, with the GPUs out of the way (ADR 0019, 0020; results at the end
+of RESULTS.md). `deploy/loadtest` adds a fake model server on each node and a second gateway as 7
+single-process pods, 5 on node-1 and 2 on node-2. Every request stays on its node, from client to
+gateway to fake server, so the slow link between the nodes isn't counted as the gateway's. The
+clients run as one Indexed Job per node (`--nodes`, default `vps-node-1=5,vps-node-2=2`), all
+starting together. It needs the `loadtest` tenant and its key in the `loadtest-key` Secret (made
+once, by hand):
 ```powershell
-# the rig: the bench code as a ConfigMap, the fake server, the load-test gateway
+# the rig: the bench code as a ConfigMap, the fake servers, the load-test gateway
 kubectl -n tollgate create configmap bench-client --from-file=bench/src/tollgate_bench --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -k deploy/loadtest
 
-# first the clients and the fake server alone: they must hold every step cleanly
+# first the clients and the fake servers alone: they must hold every step cleanly
 uv run python -m tollgate_bench load-job --name load-mock --url http://tollgate-mock.tollgate.svc:8080 `
-  --label "client -> mock" --steps 250,500,1000 --pods 7 | kubectl apply -f -
-# then through the gateway (scale it with: kubectl -n tollgate scale deploy/tollgate-gateway-load --replicas=2)
+  --label "client -> mock, node-local" --steps 250,500,750,1000 --step-s 45 | kubectl apply -f -
+# then through the gateway
 uv run python -m tollgate_bench load-job --name load-gw --url http://tollgate-gateway-load.tollgate.svc:8000 `
-  --label "gateway, 1 replica" --steps 100,250,500,1000 --pods 7 --key-secret loadtest-key | kubectl apply -f -
+  --label "gateway, 7 processes, node-local" --steps 250,500,750,1000 --step-s 45 --key-secret loadtest-key | kubectl apply -f -
 
-# each pod's log is one JSON line per step; merge them into one table
-kubectl -n tollgate wait --for=condition=complete job/load-gw --timeout=10m
-foreach ($p in kubectl -n tollgate get pods -l job-name=load-gw -o name) { kubectl -n tollgate logs $p >> bench/raw/load-gw.jsonl }
+# each pod's log is one JSON line per step; merge them into one table. A run's Jobs and pods all
+# carry its name as the instance label.
+kubectl -n tollgate wait --for=condition=complete job -l app.kubernetes.io/instance=load-gw --timeout=20m
+foreach ($p in kubectl -n tollgate get pods -l app.kubernetes.io/instance=load-gw -o name) { kubectl -n tollgate logs $p >> bench/raw/load-gw.jsonl }
 uv run python -m tollgate_bench load-report bench/raw/load-gw.jsonl
 
+kubectl -n tollgate delete job -l app.kubernetes.io/name=tollgate-load   # a Job name can only be used once
 kubectl delete -k deploy/loadtest   # afterwards
 ```
 While it runs, the gateway's own metrics are in Prometheus (`tollgate_gateway_*`): event-loop lag,
-time in each step before the model, and requests in flight.
-
-## Later
-- **Phase 4:** run the same client through the gateway and record the overhead, before and after tuning.
+time in each step before the model, requests in flight, and Redis fail-opens by step.
